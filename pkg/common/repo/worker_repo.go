@@ -15,16 +15,16 @@ import (
 
 // WorkerRepo 提供对Worker节点数据的访问
 type WorkerRepo struct {
-	etcdClient      *utils.EtcdClient
-	mongoClient     *utils.MongoDBClient
+	EtcdClient      *utils.EtcdClient
+	MongoClient     *utils.MongoDBClient
 	workersCollName string
 }
 
 // NewWorkerRepo 创建一个新的Worker仓库
 func NewWorkerRepo(etcdClient *utils.EtcdClient, mongoClient *utils.MongoDBClient) *WorkerRepo {
 	return &WorkerRepo{
-		etcdClient:      etcdClient,
-		mongoClient:     mongoClient,
+		EtcdClient:      etcdClient,
+		MongoClient:     mongoClient,
 		workersCollName: "workers",
 	}
 }
@@ -38,7 +38,7 @@ func (r *WorkerRepo) Register(worker *models.Worker, ttl int64) (clientv3.LeaseI
 	}
 
 	// 使用租约注册，以便可以通过心跳检测Worker活跃状态
-	leaseID, err := r.etcdClient.PutWithLease(worker.Key(), workerJSON, ttl)
+	leaseID, err := r.EtcdClient.PutWithLease(worker.Key(), workerJSON, ttl)
 	if err != nil {
 		return 0, fmt.Errorf("failed to register worker: %w", err)
 	}
@@ -48,7 +48,7 @@ func (r *WorkerRepo) Register(worker *models.Worker, ttl int64) (clientv3.LeaseI
 	update := bson.M{"$set": worker}
 	opts := options.Update().SetUpsert(true)
 
-	_, err = r.mongoClient.UpdateOne(r.workersCollName, filter, update, opts)
+	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update, opts)
 	if err != nil {
 		utils.Warn("failed to save worker to MongoDB",
 			zap.String("worker_id", worker.ID),
@@ -70,7 +70,7 @@ func (r *WorkerRepo) Heartbeat(worker *models.Worker) error {
 		return fmt.Errorf("failed to serialize worker: %w", err)
 	}
 
-	err = r.etcdClient.Put(worker.Key(), workerJSON)
+	err = r.EtcdClient.Put(worker.Key(), workerJSON)
 	if err != nil {
 		return fmt.Errorf("failed to update worker heartbeat: %w", err)
 	}
@@ -88,7 +88,7 @@ func (r *WorkerRepo) Heartbeat(worker *models.Worker) error {
 		},
 	}
 
-	_, err = r.mongoClient.UpdateOne(r.workersCollName, filter, update)
+	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
 		utils.Warn("failed to update worker heartbeat in MongoDB",
 			zap.String("worker_id", worker.ID),
@@ -103,7 +103,7 @@ func (r *WorkerRepo) Heartbeat(worker *models.Worker) error {
 func (r *WorkerRepo) GetByID(workerID string) (*models.Worker, error) {
 	// 优先从etcd获取最新数据
 	workerKey := constants.WorkerPrefix + workerID
-	workerJSON, err := r.etcdClient.Get(workerKey)
+	workerJSON, err := r.EtcdClient.Get(workerKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worker from etcd: %w", err)
 	}
@@ -115,7 +115,7 @@ func (r *WorkerRepo) GetByID(workerID string) (*models.Worker, error) {
 
 	// 如果etcd中不存在，尝试从MongoDB获取
 	worker := &models.Worker{}
-	err = r.mongoClient.FindOne(r.workersCollName, bson.M{"id": workerID}, worker)
+	err = r.MongoClient.FindOne(r.workersCollName, bson.M{"id": workerID}, worker)
 	if err != nil {
 		return nil, fmt.Errorf("worker not found: %w", err)
 	}
@@ -128,7 +128,7 @@ func (r *WorkerRepo) ListAll() ([]*models.Worker, error) {
 	var workers []*models.Worker
 
 	// 从etcd获取所有Worker
-	kvs, err := r.etcdClient.GetWithPrefix(constants.WorkerPrefix)
+	kvs, err := r.EtcdClient.GetWithPrefix(constants.WorkerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list workers from etcd: %w", err)
 	}
@@ -156,7 +156,7 @@ func (r *WorkerRepo) ListByStatus(status string, page, pageSize int64) ([]*model
 		OrderBy("last_heartbeat", false)
 
 	// 执行查询
-	err := r.mongoClient.FindWithOptions(
+	err := r.MongoClient.FindWithOptions(
 		r.workersCollName,
 		query.GetFilter(),
 		&workers,
@@ -167,7 +167,7 @@ func (r *WorkerRepo) ListByStatus(status string, page, pageSize int64) ([]*model
 	}
 
 	// 获取总记录数
-	total, err := r.mongoClient.Count(r.workersCollName, query.GetFilter())
+	total, err := r.MongoClient.Count(r.workersCollName, query.GetFilter())
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to count workers by status: %w", err)
 	}
@@ -212,7 +212,7 @@ func (r *WorkerRepo) EnableWorker(workerID string) error {
 		return fmt.Errorf("failed to serialize worker: %w", err)
 	}
 
-	err = r.etcdClient.Put(worker.Key(), workerJSON)
+	err = r.EtcdClient.Put(worker.Key(), workerJSON)
 	if err != nil {
 		return fmt.Errorf("failed to enable worker: %w", err)
 	}
@@ -226,7 +226,7 @@ func (r *WorkerRepo) EnableWorker(workerID string) error {
 		},
 	}
 
-	_, err = r.mongoClient.UpdateOne(r.workersCollName, filter, update)
+	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
 		utils.Warn("failed to update worker status in MongoDB",
 			zap.String("worker_id", worker.ID),
@@ -253,7 +253,7 @@ func (r *WorkerRepo) DisableWorker(workerID string) error {
 		return fmt.Errorf("failed to serialize worker: %w", err)
 	}
 
-	err = r.etcdClient.Put(worker.Key(), workerJSON)
+	err = r.EtcdClient.Put(worker.Key(), workerJSON)
 	if err != nil {
 		return fmt.Errorf("failed to disable worker: %w", err)
 	}
@@ -267,7 +267,7 @@ func (r *WorkerRepo) DisableWorker(workerID string) error {
 		},
 	}
 
-	_, err = r.mongoClient.UpdateOne(r.workersCollName, filter, update)
+	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
 		utils.Warn("failed to update worker status in MongoDB",
 			zap.String("worker_id", worker.ID),
@@ -282,7 +282,7 @@ func (r *WorkerRepo) Delete(workerID string) error {
 	workerKey := constants.WorkerPrefix + workerID
 
 	// 从etcd删除
-	err := r.etcdClient.Delete(workerKey)
+	err := r.EtcdClient.Delete(workerKey)
 	if err != nil {
 		return fmt.Errorf("failed to delete worker from etcd: %w", err)
 	}
@@ -296,7 +296,7 @@ func (r *WorkerRepo) Delete(workerID string) error {
 		},
 	}
 
-	_, err = r.mongoClient.UpdateOne(r.workersCollName, filter, update)
+	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
 		utils.Warn("failed to mark worker as deleted in MongoDB",
 			zap.String("worker_id", workerID),
@@ -314,7 +314,7 @@ func (r *WorkerRepo) UpdateWorkerResources(worker *models.Worker) error {
 		return fmt.Errorf("failed to serialize worker: %w", err)
 	}
 
-	err = r.etcdClient.Put(worker.Key(), workerJSON)
+	err = r.EtcdClient.Put(worker.Key(), workerJSON)
 	if err != nil {
 		return fmt.Errorf("failed to update worker resources: %w", err)
 	}
@@ -333,7 +333,7 @@ func (r *WorkerRepo) UpdateWorkerResources(worker *models.Worker) error {
 		},
 	}
 
-	_, err = r.mongoClient.UpdateOne(r.workersCollName, filter, update)
+	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
 		utils.Warn("failed to update worker resources in MongoDB",
 			zap.String("worker_id", worker.ID),
@@ -351,7 +351,7 @@ func (r *WorkerRepo) UpdateRunningJobs(worker *models.Worker) error {
 		return fmt.Errorf("failed to serialize worker: %w", err)
 	}
 
-	err = r.etcdClient.Put(worker.Key(), workerJSON)
+	err = r.EtcdClient.Put(worker.Key(), workerJSON)
 	if err != nil {
 		return fmt.Errorf("failed to update worker running jobs: %w", err)
 	}
@@ -367,7 +367,7 @@ func (r *WorkerRepo) UpdateRunningJobs(worker *models.Worker) error {
 		},
 	}
 
-	_, err = r.mongoClient.UpdateOne(r.workersCollName, filter, update)
+	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
 		utils.Warn("failed to update worker jobs in MongoDB",
 			zap.String("worker_id", worker.ID),
@@ -375,4 +375,9 @@ func (r *WorkerRepo) UpdateRunningJobs(worker *models.Worker) error {
 	}
 
 	return nil
+}
+
+// GetEtcdClient 获取etcd客户端
+func (r *WorkerRepo) GetEtcdClient() *utils.EtcdClient {
+	return r.EtcdClient
 }

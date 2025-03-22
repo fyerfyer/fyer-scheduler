@@ -349,3 +349,8 @@ func (r *LogRepo) AppendOutput(executionID, newOutput string) error {
 	// 保存更新
 	return r.Save(log)
 }
+
+// MongoAggregate 执行MongoDB聚合操作
+func (r *LogRepo) MongoAggregate(collection string, pipeline interface{}, results interface{}) error {
+	return r.mongoClient.Aggregate(collection, pipeline, results)
+}

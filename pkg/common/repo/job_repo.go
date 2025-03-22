@@ -14,7 +14,7 @@ import (
 
 // JobRepo 提供对任务数据的访问
 type JobRepo struct {
-	etcdClient   *utils.EtcdClient
+	EtcdClient   *utils.EtcdClient
 	mongoClient  *utils.MongoDBClient
 	jobsCollName string
 }
@@ -22,7 +22,7 @@ type JobRepo struct {
 // NewJobRepo 创建一个新的任务仓库
 func NewJobRepo(etcdClient *utils.EtcdClient, mongoClient *utils.MongoDBClient) *JobRepo {
 	return &JobRepo{
-		etcdClient:   etcdClient,
+		EtcdClient:   etcdClient,
 		mongoClient:  mongoClient,
 		jobsCollName: "jobs",
 	}
@@ -36,7 +36,7 @@ func (r *JobRepo) Save(job *models.Job) error {
 		return fmt.Errorf("failed to serialize job: %w", err)
 	}
 
-	err = r.etcdClient.Put(job.Key(), jobJSON)
+	err = r.EtcdClient.Put(job.Key(), jobJSON)
 	if err != nil {
 		return fmt.Errorf("failed to save job to etcd: %w", err)
 	}
@@ -61,7 +61,7 @@ func (r *JobRepo) Save(job *models.Job) error {
 func (r *JobRepo) GetByID(jobID string) (*models.Job, error) {
 	// 优先从etcd获取最新数据
 	jobKey := constants.JobPrefix + jobID
-	jobJSON, err := r.etcdClient.Get(jobKey)
+	jobJSON, err := r.EtcdClient.Get(jobKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get job from etcd: %w", err)
 	}
@@ -86,7 +86,7 @@ func (r *JobRepo) ListAll() ([]*models.Job, error) {
 	var jobs []*models.Job
 
 	// 从etcd获取所有任务
-	kvs, err := r.etcdClient.GetWithPrefix(constants.JobPrefix)
+	kvs, err := r.EtcdClient.GetWithPrefix(constants.JobPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list jobs from etcd: %w", err)
 	}
@@ -108,7 +108,7 @@ func (r *JobRepo) Delete(jobID string) error {
 	jobKey := constants.JobPrefix + jobID
 
 	// 从etcd删除
-	err := r.etcdClient.Delete(jobKey)
+	err := r.EtcdClient.Delete(jobKey)
 	if err != nil {
 		return fmt.Errorf("failed to delete job from etcd: %w", err)
 	}
