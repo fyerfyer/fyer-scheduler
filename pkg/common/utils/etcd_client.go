@@ -359,3 +359,8 @@ func (e *EtcdClient) KeepAliveLock(leaseID clientv3.LeaseID) error {
 
 	return nil
 }
+
+// KeepAliveLease 启动租约自动续期，返回响应channel
+func (e *EtcdClient) KeepAliveLease(ctx context.Context, leaseID clientv3.LeaseID) (<-chan *clientv3.LeaseKeepAliveResponse, error) {
+	return e.client.KeepAlive(ctx, leaseID)
+}
