@@ -1,0 +1,31 @@
+# 调度系统Worker节点配置
+
+# 基础配置
+node_type: "worker"
+node_id: "worker-01"
+version: "1.0.0"
+
+# 服务器配置
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+# etcd配置
+etcd:
+  endpoints:
+    - "localhost:2379"
+  username: ""
+  password: ""
+
+# MongoDB配置
+mongodb:
+  uri: "mongodb://localhost:27017"
+  database: "fyer-scheduler"
+
+# 日志配置
+log:
+  level: "info"
+  file_path: "logs/worker.log"
+  max_size: 100    # MB
+  max_backups: 3   # 备份文件数量
+  max_age: 7       # 天
