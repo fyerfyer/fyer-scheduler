@@ -31,3 +31,6 @@ go.work.sum
 /bin/
 /etcd
 /etcd/
+
+/logs
+/logs/
