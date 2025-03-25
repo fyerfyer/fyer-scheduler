@@ -299,6 +299,40 @@ func (_c *ILogSink_GetStats_Call) RunAndReturn(run func() map[string]interface{}
 	return _c
 }
 
+// RegisterExecutionJob provides a mock function with given fields: executionID, jobID
+func (_m *ILogSink) RegisterExecutionJob(executionID string, jobID string) {
+	_m.Called(executionID, jobID)
+}
+
+// ILogSink_RegisterExecutionJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RegisterExecutionJob'
+type ILogSink_RegisterExecutionJob_Call struct {
+	*mock.Call
+}
+
+// RegisterExecutionJob is a helper method to define mock.On call
+//   - executionID string
+//   - jobID string
+func (_e *ILogSink_Expecter) RegisterExecutionJob(executionID interface{}, jobID interface{}) *ILogSink_RegisterExecutionJob_Call {
+	return &ILogSink_RegisterExecutionJob_Call{Call: _e.mock.On("RegisterExecutionJob", executionID, jobID)}
+}
+
+func (_c *ILogSink_RegisterExecutionJob_Call) Run(run func(executionID string, jobID string)) *ILogSink_RegisterExecutionJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(string), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *ILogSink_RegisterExecutionJob_Call) Return() *ILogSink_RegisterExecutionJob_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *ILogSink_RegisterExecutionJob_Call) RunAndReturn(run func(string, string)) *ILogSink_RegisterExecutionJob_Call {
+	_c.Run(run)
+	return _c
+}
+
 // SetSendMode provides a mock function with given fields: mode
 func (_m *ILogSink) SetSendMode(mode logsink.LogSendMode) {
 	_m.Called(mode)

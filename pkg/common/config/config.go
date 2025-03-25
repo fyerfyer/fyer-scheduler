@@ -12,6 +12,7 @@ type Config struct {
 	// 节点配置
 	NodeType string `mapstructure:"node_type"` // "master" 或 "worker"
 	NodeID   string `mapstructure:"node_id"`
+	Version  string `mapstructure:"version"` // 系统版本
 
 	// 服务配置
 	Server ServerConfig `mapstructure:"server"`

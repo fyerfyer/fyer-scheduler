@@ -90,6 +90,9 @@ type ILogSink interface {
 
 	// GetStats 获取日志采集器统计信息
 	GetStats() map[string]interface{}
+
+	// RegisterExecutionJob 注册执行ID和作业ID的映射关系
+	RegisterExecutionJob(executionID string, jobID string)
 }
 
 // LogSinkStatus 表示日志采集器的状态

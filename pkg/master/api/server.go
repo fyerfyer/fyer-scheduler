@@ -198,3 +198,14 @@ func (s *APIServer) IsRunning() bool {
 func (s *APIServer) GetAddress() string {
 	return s.options.Address
 }
+
+// SetRouter 设置路由器
+func (s *APIServer) SetRouter(router *Router) {
+	s.router = router
+
+	// 设置路由
+	if s.server != nil && s.server.Handler != nil {
+		ginRouter := s.server.Handler.(*gin.Engine)
+		s.router.Setup(ginRouter)
+	}
+}

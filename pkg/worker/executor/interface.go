@@ -182,22 +182,16 @@ func NewExecutionOptions() *ExecutionOptions {
 }
 
 // NewExecutionContext 创建执行上下文
-func NewExecutionContext(job *models.Job, executionID string, reporter IExecutionReporter) *ExecutionContext {
-	timeout := time.Duration(job.Timeout) * time.Second
-	if timeout <= 0 {
-		timeout = 30 * time.Minute // 默认30分钟超时
-	}
-
+func NewExecutionContext(executionID string, job *models.Job, command string, args []string, workDir string, env map[string]string, timeout time.Duration) *ExecutionContext {
 	return &ExecutionContext{
 		ExecutionID:   executionID,
 		Job:           job,
-		Command:       job.Command,
-		Args:          job.Args,
-		WorkDir:       job.WorkDir,
-		Environment:   job.Env,
+		Command:       command,
+		Args:          args,
+		WorkDir:       workDir,
+		Environment:   env,
 		Timeout:       timeout,
-		Reporter:      reporter,
-		MaxOutputSize: 10 * 1024 * 1024, // 默认10MB
+		MaxOutputSize: 1024 * 1024, // 默认1MB
 	}
 }
 
@@ -224,4 +218,11 @@ func ExecutionResultFromJobLog(log *models.JobLog) *ExecutionResult {
 		EndTime:     log.EndTime,
 		State:       state,
 	}
+}
+
+// CreateContext 创建可取消的执行上下文
+func (c *ExecutionContext) CreateContext() context.Context {
+	// 创建带超时的上下文
+	ctx, _ := context.WithTimeout(context.Background(), c.Timeout)
+	return ctx
 }
