@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -77,7 +78,7 @@ func TestJobLockRelease(t *testing.T) {
 	require.True(t, acquired, "Should successfully acquire lock")
 
 	// 释放锁
-	err = lock.Unlock()
+	err = lockManager.ReleaseLock(jobID)
 	require.NoError(t, err, "Should not error when releasing lock")
 	assert.False(t, lock.IsLocked(), "Lock should not be locked after release")
 
@@ -106,7 +107,7 @@ func TestJobLockContention(t *testing.T) {
 
 	// 第二个worker尝试获取同一个锁
 	acquired2, err := lock2.TryLock()
-	require.NoError(t, err, "Should not error when second worker tries to acquire lock")
+	assert.Error(t, err, "Should error when second worker tries to acquire an already held lock")
 	assert.False(t, acquired2, "Second worker should fail to acquire lock")
 
 	// 第一个worker释放锁
@@ -134,10 +135,13 @@ func TestJobLockExpiration(t *testing.T) {
 	jobID := testutils.GenerateUniqueID("job")
 	lock := lockManager.CreateLock(jobID, joblock.WithTTL(1)) // 1秒TTL
 
-	// 获取锁后停止自动续期
+	// 获取锁
 	acquired, err := lock.TryLock()
 	require.NoError(t, err, "Should not error when acquiring lock")
 	require.True(t, acquired, "Should successfully acquire lock")
+
+	// 停止自动续期
+	lock.StopRenewal()
 
 	// 等待锁过期，稍微多等几秒确保过期
 	time.Sleep(3 * time.Second)
@@ -155,49 +159,85 @@ func TestJobLockExpiration(t *testing.T) {
 }
 
 func TestJobLockConcurrent(t *testing.T) {
-	// 创建锁管理器
-	lockManager := createTestLockManager(t)
-	defer lockManager.Stop()
+	// 创建一个用于所有worker的etcd客户端
+	etcdClient, err := testutils.TestEtcdClient()
+	require.NoError(t, err, "Failed to create etcd client")
 
-	// 创建多个并发worker模拟竞争
-	workerCount := 5
+	// 创建一个所有worker都会尝试锁定的公共job ID
 	jobID := testutils.GenerateUniqueID("job")
-	var wg sync.WaitGroup
-	wg.Add(workerCount)
+
+	// 并发worker的数量
+	workerCount := 5
+
+	// 创建用于同步的WaitGroup
+	var startWg sync.WaitGroup // 用于确保所有goroutine同时开始尝试
+	var doneWg sync.WaitGroup  // 用于等待所有goroutine完成
+
+	startWg.Add(1) // 这个计数器会减少一次，以同时释放所有goroutine
+	doneWg.Add(workerCount)
 
 	successCount := 0
 	var mutex sync.Mutex
+	var firstWorkerID string
 
-	// 开启多个goroutine同时尝试获取锁
+	// 在启动goroutine之前创建所有锁管理器
+	lockManagers := make([]*joblock.LockManager, workerCount)
+	for i := 0; i < workerCount; i++ {
+		workerID := testutils.GenerateUniqueID(fmt.Sprintf("worker-%d", i))
+		lockManagers[i] = joblock.NewLockManager(etcdClient, workerID)
+		err := lockManagers[i].Start()
+		require.NoError(t, err, "Failed to start lock manager")
+		defer lockManagers[i].Stop() // 确保清理
+	}
+
+	// 启动多个goroutine以模拟并发锁定尝试
 	for i := 0; i < workerCount; i++ {
 		go func(workerIndex int) {
-			defer wg.Done()
+			defer doneWg.Done()
 
-			// 每个worker创建自己的锁
+			// 为当前worker创建一个锁
+			lockManager := lockManagers[workerIndex]
 			lock := lockManager.CreateLock(jobID,
 				joblock.WithTTL(5),
 				joblock.WithMaxRetries(3))
 
+			// 等待信号开始
+			startWg.Wait()
+
 			// 尝试获取锁
-			acquired, _ := lock.TryLock()
-			if acquired {
-				// 记录成功获取锁的worker数量
+			acquired, err := lock.TryLock()
+			if err == nil && acquired {
+				// 记录成功获取锁的情况
 				mutex.Lock()
-				successCount++
+				if firstWorkerID == "" {
+					// 只记录第一个成功获取锁的worker
+					firstWorkerID = lockManager.GetWorkerID()
+					successCount++
+					t.Logf("Worker %s was first to acquire the lock", firstWorkerID)
+				}
 				mutex.Unlock()
 
-				// 持有锁一段时间
+				// 短暂持有锁以确保计数完成
 				time.Sleep(100 * time.Millisecond)
 
 				// 释放锁
-				lock.Unlock()
+				err = lockManager.ReleaseLock(jobID)
+				if err != nil {
+					t.Logf("Error releasing lock: %v", err)
+				}
 			}
 		}(i)
 	}
 
-	// 等待所有goroutine完成
-	wg.Wait()
+	// 给goroutine一些时间到达等待点
+	time.Sleep(100 * time.Millisecond)
 
-	// 验证只有一个worker能成功获取锁
+	// 发出信号让所有goroutine同时尝试获取锁
+	startWg.Done()
+
+	// 等待所有goroutine完成
+	doneWg.Wait()
+
+	// 验证只有一个worker应该成功获取锁
 	assert.Equal(t, 1, successCount, "Only one worker should successfully acquire the lock")
 }

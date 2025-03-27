@@ -211,3 +211,7 @@ func (m *LockManager) cleanupInvalidLocks() {
 			zap.Int("remaining_locks", len(m.locks)))
 	}
 }
+
+func (m *LockManager) GetWorkerID() string {
+	return m.workerID
+}

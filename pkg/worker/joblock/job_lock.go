@@ -224,9 +224,25 @@ func (j *JobLock) handleKeepAliveFailure() {
 
 	// 标记为未锁定
 	j.isLocked = false
+	j.leaseID = 0 // 清除租约ID
 
-	// 尝试重新获取锁
-	utils.Warn("attempting to re-acquire lock after keepalive failure",
-		zap.String("job_id", j.jobID),
-		zap.String("worker_id", j.workerID))
+	// 在这里，我们不自动尝试重新获取锁
+	// 这应该是由调用者决定的
+	utils.Warn("keepalive failed, lock has been released",
+        zap.String("job_id", j.jobID),
+        zap.String("worker_id", j.workerID))
+}
+
+// StopRenewal 停止自动续期
+func (j *JobLock) StopRenewal() {
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	if j.cancelFunc != nil {
+		j.cancelFunc()
+		j.cancelFunc = nil
+	}
+
+	// 清除keepalive channel而不释放锁
+	j.keepAliveCh = nil
 }
