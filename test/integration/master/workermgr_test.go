@@ -372,7 +372,7 @@ func TestHealthChecker(t *testing.T) {
 	worker.Status = constants.WorkerStatusOnline
 
 	// 注册Worker，使用短TTL
-	leaseID, err := workerRepo.Register(worker, 10)
+	leaseID, err := workerRepo.Register(worker, 10) // 10秒TTL
 	require.NoError(t, err, "Failed to register worker")
 	defer etcdClient.ReleaseLock(leaseID)
 
@@ -388,15 +388,18 @@ func TestHealthChecker(t *testing.T) {
 	updatedWorker, err := manager.GetWorker(worker.ID)
 	require.NoError(t, err, "Failed to get worker")
 	assert.Equal(t, constants.WorkerStatusOffline, updatedWorker.Status,
-		"Worker should be marked as offline")
+		"Worker should be marked as offline due to stale heartbeat")
 
-	// 直接从etcd获取不健康的worker
-	// 注意：不使用MongoDB查询，因为MongoDB更新可能有延迟
-	allWorkers, err := workerRepo.ListAll()
+	// 验证etcd和MongoDB中的数据一致 - 这是新增的一致性检测
+	err = workerRepo.CheckConsistency(worker.ID)
+	require.NoError(t, err, "Consistency check failed")
+
+	// 查询不健康的workers
+	workers, err := workerRepo.ListAll()
 	require.NoError(t, err, "Failed to list all workers")
 
 	var unhealthyWorkers []*models.Worker
-	for _, w := range allWorkers {
+	for _, w := range workers {
 		if w.Status == constants.WorkerStatusOffline {
 			unhealthyWorkers = append(unhealthyWorkers, w)
 		}
@@ -406,7 +409,8 @@ func TestHealthChecker(t *testing.T) {
 
 	// 验证不健康的worker就是我们的测试worker
 	if len(unhealthyWorkers) > 0 {
-		assert.Equal(t, worker.ID, unhealthyWorkers[0].ID, "The unhealthy worker should be our test worker")
+		assert.Equal(t, worker.ID, unhealthyWorkers[0].ID,
+			"The unhealthy worker should be our test worker")
 	}
 
 	// 现在模拟一个心跳以使Worker恢复在线
@@ -422,4 +426,8 @@ func TestHealthChecker(t *testing.T) {
 	require.NoError(t, err, "Failed to get worker")
 	assert.Equal(t, constants.WorkerStatusOnline, updatedWorker.Status,
 		"Worker should be back online after heartbeat")
+
+	// 再次验证一致性
+	err = workerRepo.CheckConsistency(worker.ID)
+	require.NoError(t, err, "Consistency check failed after status change")
 }

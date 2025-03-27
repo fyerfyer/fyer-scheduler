@@ -50,10 +50,14 @@ func (r *WorkerRepo) Register(worker *models.Worker, ttl int64) (clientv3.LeaseI
 
 	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update, opts)
 	if err != nil {
-		utils.Warn("failed to save worker to MongoDB",
-			zap.String("worker_id", worker.ID),
-			zap.Error(err))
-		// 不因MongoDB失败而阻止Worker注册，仅记录错误
+		// 如果MongoDB更新失败，回滚etcd变更以保持一致性
+		rErr := r.EtcdClient.Delete(worker.Key())
+		if rErr != nil {
+			utils.Error("failed to rollback etcd after MongoDB error",
+				zap.String("worker_id", worker.ID),
+				zap.Error(rErr))
+		}
+		return 0, fmt.Errorf("failed to save worker to MongoDB: %w", err)
 	}
 
 	return leaseID, nil
@@ -75,7 +79,7 @@ func (r *WorkerRepo) Heartbeat(worker *models.Worker) error {
 		return fmt.Errorf("failed to update worker heartbeat: %w", err)
 	}
 
-	// 可选：更新MongoDB中的心跳记录
+	// 更新MongoDB中的心跳记录
 	filter := bson.M{"id": worker.ID}
 	update := bson.M{
 		"$set": bson.M{
@@ -90,10 +94,11 @@ func (r *WorkerRepo) Heartbeat(worker *models.Worker) error {
 
 	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
-		utils.Warn("failed to update worker heartbeat in MongoDB",
+		utils.Error("failed to update worker heartbeat in MongoDB, data inconsistency may occur",
 			zap.String("worker_id", worker.ID),
 			zap.Error(err))
-		// 不因MongoDB失败而阻止Worker心跳正常工作
+		// 在生产环境中，可能需要更严格的处理，例如回滚etcd更改或触发一致性修复
+		// 但对于心跳这种高频操作，可以容忍短暂的不一致
 	}
 
 	return nil
@@ -206,18 +211,19 @@ func (r *WorkerRepo) EnableWorker(workerID string) error {
 	// 更新状态
 	worker.SetStatus(constants.WorkerStatusOnline)
 
-	// 保存到etcd
+	// 开始一致性更新
 	workerJSON, err := worker.ToJSON()
 	if err != nil {
 		return fmt.Errorf("failed to serialize worker: %w", err)
 	}
 
+	// 第一步：更新etcd
 	err = r.EtcdClient.Put(worker.Key(), workerJSON)
 	if err != nil {
-		return fmt.Errorf("failed to enable worker: %w", err)
+		return fmt.Errorf("failed to enable worker in etcd: %w", err)
 	}
 
-	// 更新MongoDB
+	// 第二步：更新MongoDB
 	filter := bson.M{"id": worker.ID}
 	update := bson.M{
 		"$set": bson.M{
@@ -228,11 +234,19 @@ func (r *WorkerRepo) EnableWorker(workerID string) error {
 
 	_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
 	if err != nil {
-		utils.Warn("failed to update worker status in MongoDB",
-			zap.String("worker_id", worker.ID),
-			zap.Error(err))
+		// MongoDB更新失败，尝试回滚etcd更改
+		worker.SetStatus(constants.WorkerStatusOffline) // 恢复原状态
+		rollbackJSON, _ := worker.ToJSON()
+		rErr := r.EtcdClient.Put(worker.Key(), rollbackJSON)
+		if rErr != nil {
+			utils.Error("failed to rollback etcd change after MongoDB error",
+				zap.String("worker_id", worker.ID),
+				zap.Error(rErr))
+		}
+		return fmt.Errorf("failed to enable worker in MongoDB: %w", err)
 	}
 
+	utils.Info("worker enabled successfully", zap.String("worker_id", workerID))
 	return nil
 }
 
@@ -380,4 +394,59 @@ func (r *WorkerRepo) UpdateRunningJobs(worker *models.Worker) error {
 // GetEtcdClient 获取etcd客户端
 func (r *WorkerRepo) GetEtcdClient() *utils.EtcdClient {
 	return r.EtcdClient
+}
+
+func (r *WorkerRepo) CheckConsistency(workerID string) error {
+	// 从两个存储获取数据
+	worker, err := r.GetByID(workerID)
+	if err != nil {
+		return fmt.Errorf("failed to get worker: %w", err)
+	}
+
+	// 比较etcd和MongoDB的数据
+	etcdJSON, err := r.EtcdClient.Get(worker.Key())
+	if err != nil {
+		return fmt.Errorf("failed to get worker from etcd: %w", err)
+	}
+
+	// 如果etcd中不存在此Worker
+	if etcdJSON == "" {
+		// 要么MongoDB中也不应该存在，要么我们应该将其添加回etcd
+		if worker.Status != constants.WorkerStatusOffline {
+			// 恢复到etcd
+			workerJSON, err := worker.ToJSON()
+			if err != nil {
+				return fmt.Errorf("failed to serialize worker: %w", err)
+			}
+			err = r.EtcdClient.Put(worker.Key(), workerJSON)
+			if err != nil {
+				return fmt.Errorf("failed to restore worker to etcd: %w", err)
+			}
+			utils.Warn("restored worker to etcd during consistency check",
+				zap.String("worker_id", worker.ID))
+		}
+		return nil
+	}
+
+	etcdWorker, err := models.WorkerFromJSON(etcdJSON)
+	if err != nil {
+		return fmt.Errorf("failed to parse worker from etcd: %w", err)
+	}
+
+	// 检查数据是否一致
+	if worker.Status != etcdWorker.Status {
+		// 使用etcd中的数据（它是最新的）来更新MongoDB
+		filter := bson.M{"id": worker.ID}
+		update := bson.M{"$set": bson.M{"status": etcdWorker.Status}}
+		_, err = r.MongoClient.UpdateOne(r.workersCollName, filter, update)
+		if err != nil {
+			return fmt.Errorf("failed to update worker status in MongoDB: %w", err)
+		}
+		utils.Warn("fixed worker status inconsistency",
+			zap.String("worker_id", worker.ID),
+			zap.String("mongo_status", worker.Status),
+			zap.String("etcd_status", etcdWorker.Status))
+	}
+
+	return nil
 }
