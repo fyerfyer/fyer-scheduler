@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/fyerfyer/fyer-scheduler/pkg/worker/register"
 	"github.com/stretchr/testify/mock"
+	"go.mongodb.org/mongo-driver/bson"
 	"math/rand"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func WaitForCondition(checkFn func() bool, timeout time.Duration) bool {
 
 // SetupTestEnvironment 设置测试环境
 func SetupTestEnvironment(t *testing.T) (*utils.EtcdClient, *utils.MongoDBClient) {
-	// 初始化随机数生成器
+	// 初始化随机种子
 	rand.Seed(time.Now().UnixNano())
 
 	// 创建客户端
@@ -85,10 +86,25 @@ func SetupTestEnvironment(t *testing.T) (*utils.EtcdClient, *utils.MongoDBClient
 		require.NoError(t, err, "Failed to create MongoDB client")
 	}
 
-	// 清理可能存在的测试数据
+	// 清理测试数据
 	CleanTestData(t, etcdClient)
+	AddMongoCleanup(t, mongoClient)
 
 	return etcdClient, mongoClient
+}
+
+// AddMongoCleanup 添加MongoDB清理到CleanTestData
+func AddMongoCleanup(t *testing.T, mongoClient *utils.MongoDBClient) {
+	// 清理作业日志集合
+	_, err := mongoClient.DeleteMany("job_logs", bson.M{})
+	require.NoError(t, err, "Failed to clean logs from MongoDB")
+
+	// 根据需要清理其他集合
+	_, err = mongoClient.DeleteMany("jobs", bson.M{})
+	require.NoError(t, err, "Failed to clean jobs from MongoDB")
+
+	_, err = mongoClient.DeleteMany("workers", bson.M{})
+	require.NoError(t, err, "Failed to clean workers from MongoDB")
 }
 
 // CleanTestData 清理测试数据
@@ -106,12 +122,12 @@ func CleanTestData(t *testing.T, etcdClient *utils.EtcdClient) {
 // TeardownTestEnvironment 清理测试环境
 func TeardownTestEnvironment(t *testing.T, etcdClient *utils.EtcdClient, mongoClient *utils.MongoDBClient) {
 	if etcdClient != nil {
-		// 再次清理测试数据以确保干净
 		CleanTestData(t, etcdClient)
 		etcdClient.Close()
 	}
 
 	if mongoClient != nil {
+		AddMongoCleanup(t, mongoClient)
 		mongoClient.Close()
 	}
 }
