@@ -297,12 +297,14 @@ func (m *MetricsManager) GetClusterStats() (map[string]interface{}, error) {
 	var totalCPUUsage, totalMemoryUsage, totalDiskUsage float64
 	var highLoadWorkers, lowResourceWorkers int
 	var totalRunningJobs int
+	var totalCPUCores int = 0 // 初始化CPU核心计数器
+	var totalMemory int64 = 0 // 初始化内存计数器
 
-	for _, metrics := range m.metricsCache {
+	for workerID, metrics := range m.metricsCache {
+		// 现有的平均值计算
 		totalCPUUsage += metrics.CPUUsagePercent
 		totalMemoryUsage += metrics.MemoryUsageRatio
 		totalDiskUsage += metrics.DiskUsageRatio
-		totalRunningJobs += metrics.RunningJobs
 
 		if metrics.HighLoad {
 			highLoadWorkers++
@@ -310,6 +312,19 @@ func (m *MetricsManager) GetClusterStats() (map[string]interface{}, error) {
 		if metrics.LowResources {
 			lowResourceWorkers++
 		}
+
+		totalRunningJobs += metrics.RunningJobs
+
+		// 累加CPU核心数和内存总量
+		// 直接获取worker以访问CPU核心数
+		worker, err := m.workerManager.GetWorker(workerID)
+		if err == nil {
+			totalCPUCores += worker.CPUCores
+			// totalMemory += worker.MemoryTotal  // 如果需要，可以改用此方式
+		}
+
+		// 使用指标中的内存总量
+		totalMemory += metrics.MemoryTotal
 	}
 	m.cacheLock.RUnlock()
 
@@ -321,15 +336,17 @@ func (m *MetricsManager) GetClusterStats() (map[string]interface{}, error) {
 		avgDiskUsage = totalDiskUsage / float64(workers)
 	}
 
-	// 返回统计信息
+	// 返回包含新字段的统计信息
 	return map[string]interface{}{
 		"total_workers":        workers,
 		"avg_cpu_usage":        avgCPUUsage,
-		"avg_memory_usage":     avgMemoryUsage * 100, // 转为百分比
-		"avg_disk_usage":       avgDiskUsage * 100,   // 转为百分比
+		"avg_memory_usage":     avgMemoryUsage * 100, // 转换为百分比
+		"avg_disk_usage":       avgDiskUsage * 100,   // 转换为百分比
 		"high_load_workers":    highLoadWorkers,
 		"low_resource_workers": lowResourceWorkers,
 		"total_running_jobs":   totalRunningJobs,
+		"total_cpu_cores":      totalCPUCores, // 添加CPU核心总数
+		"total_memory":         totalMemory,   // 添加内存总量
 		"timestamp":            time.Now(),
 	}, nil
 }
