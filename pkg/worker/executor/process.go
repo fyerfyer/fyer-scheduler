@@ -36,6 +36,8 @@ type Process struct {
 	outputHandler func(string)
 	maxOutputSize int
 	currentSize   int
+
+	isTimedOut bool
 }
 
 // ProcessOptions 定义进程选项
@@ -225,13 +227,41 @@ func (p *Process) Wait() (int, error) {
 
 // WaitWithTimeout 带超时的等待进程完成
 func (p *Process) WaitWithTimeout(timeout time.Duration) (int, error, bool) {
+	if timeout <= 0 {
+		res, err := p.Wait()
+		return res, err, false
+	}
+
+	fmt.Printf("DEBUG: Waiting for process %s with timeout %v\n", p.executionID, timeout)
+	timeoutCh := time.After(timeout)
+
 	select {
+	case <-timeoutCh:
+		fmt.Printf("DEBUG: Process %s timed out after %v\n", p.executionID, timeout)
+
+		// 设置超时标志
+		p.mutex.Lock()
+		p.isTimedOut = true
+		p.mutex.Unlock()
+
+		// 终止进程
+		p.Kill()
+
+		// 等待进程实际结束
+		<-p.done
+
+		p.mutex.RLock()
+		defer p.mutex.RUnlock()
+		// 即使进程有退出码，也将其视为超时
+		return -1, fmt.Errorf("process execution timed out after %v", timeout), true
+
 	case <-p.done:
+		// 进程在超时前完成
+		fmt.Printf("DEBUG: Process %s completed before timeout, exit code: %d, error: %v\n",
+			p.executionID, p.exitCode, p.exitErr)
 		p.mutex.RLock()
 		defer p.mutex.RUnlock()
 		return p.exitCode, p.exitErr, false
-	case <-time.After(timeout):
-		return 0, fmt.Errorf("wait timed out"), true
 	}
 }
 
