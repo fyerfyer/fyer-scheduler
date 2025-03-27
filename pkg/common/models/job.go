@@ -13,12 +13,12 @@ import (
 // Job 表示一个需要调度执行的任务
 type Job struct {
 	// 基本信息
-	ID          string    `json:"id"`          // 任务唯一标识
-	Name        string    `json:"name"`        // 任务名称
-	Description string    `json:"description"` // 任务描述
-	CreateTime  time.Time `json:"create_time"` // 创建时间
-	UpdateTime  time.Time `json:"update_time"` // 更新时间
-	Creator     string    `json:"creator"`     // 创建者
+	ID          string    `json:"id" bson:"id"`                   // 任务唯一标识
+	Name        string    `json:"name" bson:"name"`               // 任务名称
+	Description string    `json:"description" bson:"description"` // 任务描述
+	CreateTime  time.Time `json:"create_time" bson:"create_time"` // 创建时间
+	UpdateTime  time.Time `json:"update_time" bson:"update_time"` // 更新时间
+	Creator     string    `json:"creator" bson:"creator"`         // 创建者
 
 	// 执行信息
 	Command    string            `json:"command"`     // 要执行的命令
@@ -30,15 +30,15 @@ type Job struct {
 	RetryDelay int               `json:"retry_delay"` // 重试间隔(秒)
 
 	// 调度信息
-	CronExpr    string    `json:"cron_expr"`     // Cron表达式
-	Enabled     bool      `json:"enabled"`       // 是否启用
-	LastRunTime time.Time `json:"last_run_time"` // 上次运行时间
-	NextRunTime time.Time `json:"next_run_time"` // 下次运行时间
+	CronExpr    string    `json:"cron_expr" bson:"cron_expr"`         // Cron表达式
+	Enabled     bool      `json:"enabled" bson:"enabled"`             // 是否启用
+	LastRunTime time.Time `json:"last_run_time" bson:"last_run_time"` // 上次运行时间
+	NextRunTime time.Time `json:"next_run_time" bson:"next_run_time"` // 下次运行时间
 
 	// 状态信息
-	Status       string `json:"status"`         // 任务状态
-	LastResult   string `json:"last_result"`    // 上次执行结果
-	LastExitCode int    `json:"last_exit_code"` // 上次退出码
+	Status       string `json:"status" bson:"status"`                 // 任务状态
+	LastResult   string `json:"last_result" bson:"last_result"`       // 上次执行结果
+	LastExitCode int    `json:"last_exit_code" bson:"last_exit_code"` // 上次退出码
 }
 
 // NewJob 创建一个新任务
