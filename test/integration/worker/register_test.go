@@ -215,7 +215,6 @@ func TestHealthCheck(t *testing.T) {
 		IP:               "127.0.0.1",
 		HeartbeatTimeout: 10,
 		HeartbeatTTL:     60,
-		ResourceInterval: 5 * time.Second,
 	}
 
 	// 创建Worker注册器
@@ -232,8 +231,15 @@ func TestHealthCheck(t *testing.T) {
 	resourceCollector.Start()
 	defer resourceCollector.Stop()
 
+	// 确保资源收集器有时间收集资源
+	time.Sleep(500 * time.Millisecond)
+
 	// 创建健康检查器
-	healthChecker := register.NewHealthChecker(workerRegister, resourceCollector, 1*time.Second)
+	healthChecker := register.NewHealthChecker(
+		workerRegister,
+		resourceCollector,
+		1*time.Second, // 较短的心跳间隔用于测试
+	)
 
 	// 启动健康检查
 	err = healthChecker.Start()
@@ -241,19 +247,26 @@ func TestHealthCheck(t *testing.T) {
 	defer healthChecker.Stop()
 
 	// 等待健康检查执行
-	time.Sleep(2 * time.Second)
-
-	// 验证健康状态
-	assert.True(t, healthChecker.IsHealthy(), "Worker should be healthy")
+	time.Sleep(1 * time.Second)
 
 	// 获取健康状态信息
 	healthStatus := healthChecker.GetHealthStatus()
-	assert.NotNil(t, healthStatus, "Health status should not be nil")
+
+	// 验证健康状态
+	assert.True(t, healthChecker.IsHealthy(), "Health check should report healthy")
 
 	// 检查资源信息是否包含在健康状态中
-	resourceInfo, exists := healthStatus["resources"]
+	resourceInfo, exists := healthStatus["resource_info"]
 	assert.True(t, exists, "Health status should include resource information")
 	assert.NotNil(t, resourceInfo, "Resource information should not be nil")
+
+	// 检查具体资源信息
+	if info, ok := resourceInfo.(register.ResourceInfo); ok {
+		assert.GreaterOrEqual(t, info.CPUCores, 1, "Should have at least 1 CPU core")
+		assert.GreaterOrEqual(t, info.MemoryTotal, int64(1), "Should have memory info")
+	} else {
+		t.Error("Could not cast resource_info to ResourceInfo")
+	}
 }
 
 // TestSignalHandler 测试信号处理
