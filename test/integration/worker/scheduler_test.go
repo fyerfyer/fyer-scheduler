@@ -70,7 +70,7 @@ func TestSchedulerBasicFunctions(t *testing.T) {
 	require.NoError(t, err, "Failed to add job1")
 
 	// 添加一个带cron表达式的任务
-	job2 := jobFactory.CreateScheduledJob("*/5 * * * * *") // 每5秒执行一次
+	job2 := jobFactory.CreateScheduledJob("@every 5s") // 每5秒执行一次
 	err = sched.AddJob(job2)
 	require.NoError(t, err, "Failed to add job2")
 

@@ -92,6 +92,9 @@ type ScheduledJob struct {
 
 	// Lock 任务锁，用于分布式环境下确保任务只被执行一次
 	Lock *joblock.JobLock
+
+	// RetryCount 重试次数
+	RetryCount int
 }
 
 // SchedulerStatus 调度器状态

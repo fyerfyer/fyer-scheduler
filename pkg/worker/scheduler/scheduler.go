@@ -529,11 +529,39 @@ func (s *Scheduler) executeJob(job *ScheduledJob) {
 		s.jobManager.ReportJobStatus(job.Job, constants.JobStatusFailed)
 
 		// 是否需要重试
-		if s.options.FailStrategy == FailStrategyRetry && s.options.MaxRetries > 0 {
-			// 后续可以添加重试逻辑
+		if s.options.FailStrategy == FailStrategyRetry && job.RetryCount < s.options.MaxRetries {
+			// 更新重试次数
+			job.RetryCount++
+
+			utils.Info("scheduling job retry",
+				zap.String("job_id", job.Job.ID),
+				zap.String("name", job.Job.Name),
+				zap.Int("retry_count", job.RetryCount),
+				zap.Int("max_retries", s.options.MaxRetries),
+				zap.Duration("retry_delay", s.options.RetryDelay))
+
+			// 创建新的调度任务
+			go func(retryJob *ScheduledJob) {
+				// 等待重试延迟
+				time.Sleep(s.options.RetryDelay)
+
+				if !s.isRunning {
+					return
+				}
+
+				// 重新执行任务
+				s.executeJob(retryJob)
+			}(job)
+
+			// 更新队列中的任务
+			s.jobQueue.Update(job)
+
+			// 释放锁
+			return
 		}
 	} else {
 		// 任务执行成功
+		job.RetryCount = 0
 		utils.Info("job execution completed successfully",
 			zap.String("job_id", jobID),
 			zap.String("name", job.Job.Name),
@@ -561,13 +589,14 @@ func (s *Scheduler) executeJob(job *ScheduledJob) {
 
 // scheduleNextRun 计算并安排任务的下一次执行
 func (s *Scheduler) scheduleNextRun(job *ScheduledJob) {
-	// 只有启用了定时任务的才需要重新调度
-	if job.Job.CronExpr == "" || !job.Job.Enabled {
+	// 仅当作业有cron表达式时才继续
+	if job.Job.CronExpr == "" {
 		return
 	}
 
-	// 计算下一次执行时间
-	nextTime, err := s.cronParser.GetNextRunTime(job.Job.CronExpr, time.Now())
+	// 计算下一次运行时间
+	now := time.Now()
+	nextRunTime, err := s.cronParser.GetNextRunTime(job.Job.CronExpr, now)
 	if err != nil {
 		utils.Error("failed to calculate next run time",
 			zap.String("job_id", job.Job.ID),
@@ -576,21 +605,28 @@ func (s *Scheduler) scheduleNextRun(job *ScheduledJob) {
 		return
 	}
 
-	// 更新下一次执行时间
-	job.NextRunTime = nextTime
-	job.Job.NextRunTime = nextTime
+	// 更新作业的下一次运行时间
+	job.NextRunTime = nextRunTime
 
-	// 重新加入队列
-	err = s.jobQueue.Push(job)
-	if err != nil {
-		utils.Error("failed to re-queue job for next execution",
-			zap.String("job_id", job.Job.ID),
-			zap.Error(err))
+	// 为下一次执行重置重试计数
+	job.RetryCount = 0
+
+	// 检查作业是否已经在队列中，如果在则更新它
+	if s.jobQueue.Contains(job.Job.ID) {
+		err = s.jobQueue.Update(job)
+		if err != nil {
+			utils.Error("failed to update job in queue",
+				zap.String("job_id", job.Job.ID),
+				zap.Error(err))
+		}
 	} else {
-		utils.Info("job scheduled for next execution",
-			zap.String("job_id", job.Job.ID),
-			zap.String("name", job.Job.Name),
-			zap.Time("next_run_time", nextTime))
+		// 否则将其添加到队列中
+		err = s.jobQueue.Push(job)
+		if err != nil {
+			utils.Error("failed to re-queue job for next execution",
+				zap.String("job_id", job.Job.ID),
+				zap.Error(err))
+		}
 	}
 }
 

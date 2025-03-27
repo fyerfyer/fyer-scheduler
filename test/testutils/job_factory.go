@@ -2,6 +2,8 @@ package testutils
 
 import (
 	"fmt"
+	"github.com/fyerfyer/fyer-scheduler/pkg/common/utils"
+	"go.uber.org/zap"
 	"time"
 
 	"github.com/fyerfyer/fyer-scheduler/pkg/common/constants"
@@ -33,7 +35,15 @@ func (f *JobFactory) CreateSimpleJob() *models.Job {
 func (f *JobFactory) CreateScheduledJob(cronExpr string) *models.Job {
 	f.jobCounter++
 	name := fmt.Sprintf("scheduled-job-%d", f.jobCounter)
-	job, _ := models.NewJob(name, "echo scheduled task", cronExpr)
+	job, err := models.NewJob(name, "echo scheduled task", cronExpr)
+	if err != nil {
+		// 这里可以使用一个更好的错误处理方式
+		utils.Error("failed to create scheduled job",
+			zap.String("name", name),
+			zap.String("cron", cronExpr),
+			zap.Error(err))
+		return nil
+	}
 	return job
 }
 
@@ -54,7 +64,6 @@ func (f *JobFactory) CreateComplexJob(name, command, cronExpr string, timeout in
 
 	job, _ := models.NewJob(name, command, cronExpr)
 	job.Timeout = timeout
-	job.WorkDir = "/tmp"
 	job.MaxRetry = 3
 	job.RetryDelay = 5
 
