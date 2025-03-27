@@ -139,7 +139,12 @@ func (e *EtcdClient) GetWithPrefix(prefix string) (map[string]string, error) {
 		return nil
 	}
 
+	Info("fetching keys with prefix", zap.String("prefix", prefix))
 	err := e.withRetry(operation, "GetWithPrefix: "+prefix)
+	if err != nil {
+		Error("failed to fetch keys with prefix", zap.String("prefix", prefix), zap.Error(err))
+		return nil, err
+	}
 	return result, err
 }
 

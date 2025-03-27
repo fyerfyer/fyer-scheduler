@@ -38,14 +38,15 @@ func NewWorkerJobManager(etcdClient *utils.EtcdClient, workerID string) IWorkerJ
 // Start 启动任务管理器
 func (m *WorkerJobManager) Start() error {
 	m.lock.Lock()
-	defer m.lock.Unlock()
 
 	if m.isRunning {
 		return nil // 已经在运行
 	}
 
+	utils.Info("Starting job manager init")
 	m.isRunning = true
 	m.stopChan = make(chan struct{})
+	m.lock.Unlock()
 
 	// 加载所有当前任务
 	if err := m.loadJobs(); err != nil {
@@ -53,8 +54,12 @@ func (m *WorkerJobManager) Start() error {
 		// 继续启动，不因初始加载失败而阻止服务启动
 	}
 
+	utils.Info("Jobs loaded successfully")
+
 	// 启动监听协程
+	utils.Info("About to start watching jobs")
 	go m.WatchJobs()
+	utils.Info("Watch goroutine started")
 
 	utils.Info("worker job manager started", zap.String("worker_id", m.workerID))
 	return nil
@@ -259,6 +264,10 @@ func (m *WorkerJobManager) IsJobAssignedToWorker(job *models.Job) bool {
 		if assignedWorkerID, exists := job.Env["ASSIGNED_WORKER_ID"]; exists {
 			return assignedWorkerID == m.workerID
 		}
+
+		if workerID, exists := job.Env["WORKER_ID"]; exists {
+            return workerID == m.workerID
+        }
 	}
 
 	// 如果任务没有指定Worker，则根据其他规则判断
@@ -281,6 +290,12 @@ func (m *WorkerJobManager) IsJobAssignedToWorker(job *models.Job) bool {
 		return job.Env != nil && job.Env["EXECUTOR_WORKER_ID"] == m.workerID
 	}
 
+	// 默认：只有在没有Worker ID的情况下，才允许其他Worker处理
+	// 这可以根据实际需求进行调整
+	if job.Env != nil && (job.Env["ASSIGNED_WORKER_ID"] != "" || job.Env["WORKER_ID"] != "") {
+        return false  // If any worker assignment exists but doesn't match, reject
+    }
+
 	return true // 默认允许所有Worker处理所有任务
 }
 
@@ -288,8 +303,6 @@ func (m *WorkerJobManager) IsJobAssignedToWorker(job *models.Job) bool {
 func (m *WorkerJobManager) GetWorkerID() string {
 	return m.workerID
 }
-
-// 以下是实现的辅助方法
 
 // loadJobs 从etcd加载所有任务
 func (m *WorkerJobManager) loadJobs() error {

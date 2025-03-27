@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -53,14 +54,124 @@ func (h *testJobEventHandler) HandleJobEvent(event *jobmgr.JobEvent) {
 	h.t.Logf("Received job event: type=%d, job=%s", event.Type, event.Job.Name)
 }
 
-func TestJobManagerInitialization(t *testing.T) {
-	// 创建任务管理器
-	workerID := testutils.GenerateUniqueID("worker")
-	manager := createTestJobManager(t, workerID)
-	defer manager.Stop()
+func TestEtcdGetWithPrefix(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// 验证 Worker ID
-	assert.Equal(t, workerID, manager.GetWorkerID(), "Worker ID should match")
+	// 创建etcd客户端
+	etcdClient, err := testutils.TestEtcdClient()
+	require.NoError(t, err, "Failed to create etcd client")
+	defer etcdClient.Close()
+
+	err = testutils.CleanEtcdPrefix(etcdClient, constants.JobPrefix)
+	require.NoError(t, err, "Failed to clean etcd data")
+
+	// 添加一个测试任务到etcd
+	jobID := testutils.GenerateUniqueID("job")
+	jobKey := constants.JobPrefix + jobID
+	err = etcdClient.Put(jobKey, "{\"id\":\""+jobID+"\",\"name\":\"test\"}")
+	require.NoError(t, err, "Failed to add test job")
+
+	// 创建用于等待操作完成的通道
+	done := make(chan struct{})
+
+	// 尝试在一个goroutine中使用前缀获取
+	go func() {
+		result, err := etcdClient.GetWithPrefix(constants.JobPrefix)
+		if err != nil {
+			t.Logf("Error fetching with prefix: %v", err)
+		} else {
+			t.Logf("Successfully fetched %d keys", len(result))
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Log("GetWithPrefix completed successfully")
+	case <-ctx.Done():
+		t.Fatal("GetWithPrefix timed out")
+	}
+}
+
+func TestListJobs(t *testing.T) {
+	etcdClient, err := testutils.TestEtcdClient()
+	require.NoError(t, err)
+	defer etcdClient.Close()
+
+	workerID := testutils.GenerateUniqueID("worker")
+	manager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	var jobsList []*models.Job
+	var listErr error
+
+	go func() {
+		jobsList, listErr = manager.ListJobs()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Logf("ListJobs completed with %d jobs", len(jobsList))
+		if listErr != nil {
+			t.Errorf("Error: %v", listErr)
+		}
+	case <-ctx.Done():
+		t.Fatalf("ListJobs timed out")
+	}
+}
+
+func TestJobManagerInitialization(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// 创建 etcd 客户端
+	etcdClient, err := testutils.TestEtcdClient()
+	require.NoError(t, err, "Failed to create etcd client")
+	defer etcdClient.Close()
+
+	err = testutils.CleanEtcdPrefix(etcdClient, constants.JobPrefix)
+	require.NoError(t, err, "Failed to clean etcd data")
+
+	workerID := testutils.GenerateUniqueID("worker")
+	t.Logf("Using worker ID: %s", workerID)
+
+	// 启动 goroutine来创建管理器
+	doneCh := make(chan struct{})
+	var manager jobmgr.IWorkerJobManager
+	var startErr error
+
+	go func() {
+		// 创建任务管理器
+		t.Log("Creating job manager...")
+		mgr := jobmgr.NewWorkerJobManager(etcdClient, workerID)
+		t.Log("Starting job manager...")
+		startErr = mgr.Start()
+		t.Log("Job manager Start() method returned")
+
+		manager = mgr
+		close(doneCh)
+	}()
+
+	// 等待 goroutine 完成或超时
+	select {
+	case <-doneCh:
+		// Success
+		if startErr != nil {
+			t.Fatalf("Failed to start job manager: %v", startErr)
+		}
+
+		defer manager.Stop()
+		assert.Equal(t, workerID, manager.GetWorkerID(), "Worker ID should match")
+		t.Log("Test completed successfully")
+
+	case <-ctx.Done():
+		t.Fatalf("Test timeout: %v", ctx.Err())
+	}
 }
 
 func TestJobManagerRegisterHandler(t *testing.T) {
