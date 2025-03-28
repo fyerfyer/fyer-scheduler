@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/fyerfyer/fyer-scheduler/pkg/master/api"
+	"github.com/fyerfyer/fyer-scheduler/pkg/master/logmgr"
 	"github.com/fyerfyer/fyer-scheduler/test/testutils"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // setupRouter 创建一个带有API处理程序的测试路由器
@@ -26,6 +28,7 @@ func setupRouter(t *testing.T) (*gin.Engine, *api.JobHandler, *api.LogHandler) {
 	jobRepo := testutils.CreateTestJobRepo(t, etcdClient, mongoClient)
 	workerRepo := testutils.CreateTestWorkerRepo(t, etcdClient, mongoClient)
 	logRepo := testutils.CreateTestLogRepo(t, mongoClient)
+	logManager := logmgr.NewLogManager(logRepo)
 
 	// 创建作业管理器和操作
 	jobManager := testutils.CreateTestJobManager(t, jobRepo, logRepo, workerRepo, etcdClient)
@@ -33,7 +36,7 @@ func setupRouter(t *testing.T) (*gin.Engine, *api.JobHandler, *api.LogHandler) {
 
 	// 创建API处理程序
 	jobHandler := api.NewJobHandler(jobManager, jobOps, nil)
-	logHandler := api.NewLogHandler(logRepo)
+	logHandler := api.NewLogHandler(logManager)
 
 	// 创建路由器
 	router := gin.New()
@@ -192,11 +195,22 @@ func TestUpdateJob(t *testing.T) {
 // TestTriggerJob 测试TriggerJob API端点
 func TestTriggerJob(t *testing.T) {
 	router, _, _ := setupRouter(t)
+	etcdClient, _ := testutils.SetupTestEnvironment(t)
+
+	// 注册一个测试工作节点
+	workerID := "test-worker-01"
+	workerRegister, err := testutils.CreateTestWorker(etcdClient, workerID, map[string]string{"env": "test"})
+	require.NoError(t, err, "Failed to create test worker")
+	defer workerRegister.Stop()
+
+	// 等待工作节点注册传播
+	time.Sleep(500 * time.Millisecond)
 
 	// 首先创建一个作业
 	jobReq := api.CreateJobRequest{
 		Name:    "test-trigger-job",
 		Command: "echo triggered",
+		Enabled: true,
 	}
 
 	// 创建作业
@@ -213,7 +227,7 @@ func TestTriggerJob(t *testing.T) {
 
 	// 解析响应以获取执行ID
 	var resp api.Response
-	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err, "Failed to unmarshal response")
 
 	resultMap, ok := resp.Data.(map[string]interface{})

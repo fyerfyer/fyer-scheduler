@@ -215,6 +215,14 @@ func (m *WorkerJobManager) ReportJobStatus(job *models.Job, status string) error
 	job.SetStatus(status)
 	job.UpdateTime = time.Now()
 
+	// 确保任务被标记为由当前Worker执行
+    if status == constants.JobStatusRunning {
+        if job.Env == nil {
+            job.Env = make(map[string]string)
+        }
+        job.Env["EXECUTOR_WORKER_ID"] = m.workerID
+    }
+
 	// 将更新后的任务状态保存到etcd
 	jobJSON, err := job.ToJSON()
 	if err != nil {
@@ -248,7 +256,8 @@ func (m *WorkerJobManager) ReportJobStatus(job *models.Job, status string) error
 func (m *WorkerJobManager) KillJob(jobID string) error {
 	// 通过etcd发出终止信号
 	killKey := constants.JobPrefix + jobID + "/kill"
-	err := m.etcdClient.Put(killKey, "")
+	killValue := fmt.Sprintf("kill_signal_%d", time.Now().Unix()) // 添加时间戳
+    err := m.etcdClient.Put(killKey, killValue)
 	if err != nil {
 		return fmt.Errorf("failed to send kill signal: %w", err)
 	}
