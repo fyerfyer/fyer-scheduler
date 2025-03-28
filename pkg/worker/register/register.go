@@ -241,6 +241,10 @@ func (wr *WorkerRegister) Stop() error {
 	wr.lock.Lock()
 	defer wr.lock.Unlock()
 
+	utils.Info("stopping worker register service",
+		zap.String("worker_id", wr.worker.ID),
+		zap.String("current_status", wr.worker.Status))
+
 	if !wr.isRunning {
 		return nil
 	}
@@ -254,6 +258,11 @@ func (wr *WorkerRegister) Stop() error {
 		utils.Error("failed to set worker status to offline", zap.Error(err))
 		// 继续停止过程
 	}
+
+	utils.Info("set worker status to offline",
+		zap.String("worker_id", wr.worker.ID),
+		zap.String("status", wr.worker.Status),
+		zap.Error(err))
 
 	// 释放租约
 	wr.statusMutex.RLock()
@@ -286,6 +295,11 @@ func (wr *WorkerRegister) SetStatus(status string) error {
 	wr.statusMutex.Lock()
 	defer wr.statusMutex.Unlock()
 
+	utils.Info("setting worker status",
+		zap.String("worker_id", wr.worker.ID),
+		zap.String("old_status", wr.worker.Status),
+		zap.String("new_status", status))
+
 	if status != constants.WorkerStatusOnline &&
 		status != constants.WorkerStatusOffline &&
 		status != constants.WorkerStatusDisabled {
@@ -295,9 +309,16 @@ func (wr *WorkerRegister) SetStatus(status string) error {
 	// 更新 Worker 状态
 	wr.worker.SetStatus(status)
 	wr.status.State = status
+	utils.Info("worker status changed", 
+		zap.String("worker_id", wr.worker.ID), 
+		zap.String("status", status))
 
 	// 如果已注册且不是设置为离线状态，更新 etcd 中的数据
-	if wr.status.IsRegistered && status != constants.WorkerStatusOffline {
+	if wr.status.IsRegistered {
+		utils.Info("updating status in etcd",
+			zap.String("worker_id", wr.worker.ID),
+			zap.String("status", status))
+
 		workerJSON, err := wr.worker.ToJSON()
 		if err != nil {
 			return fmt.Errorf("failed to serialize worker: %w", err)

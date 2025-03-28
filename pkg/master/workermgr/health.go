@@ -117,6 +117,12 @@ func (h *HealthChecker) checkAllWorkers() {
 
 // checkWorkerHealth 检查单个Worker的健康状态
 func (h *HealthChecker) checkWorkerHealth(worker *models.Worker) {
+	utils.Info("checking worker health",
+		zap.String("worker_id", worker.ID),
+		zap.String("current_status", worker.Status),
+		zap.Time("last_heartbeat", worker.LastHeartbeat),
+		zap.Float64("heartbeat_age_seconds", time.Since(worker.LastHeartbeat).Seconds()))
+
 	isActive := h.isWorkerActive(worker)
 	currentStatus := worker.Status
 
