@@ -401,3 +401,136 @@ func TestJobManagerIsJobAssignedToWorker(t *testing.T) {
 	isAssigned = manager.IsJobAssignedToWorker(otherJob)
 	assert.False(t, isAssigned, "Job should not be assigned to this worker")
 }
+
+func TestReportJobStatus(t *testing.T) {
+	// 创建作业管理器
+	workerID := testutils.GenerateUniqueID("worker")
+	jobManager := createTestJobManager(t, workerID)
+	defer jobManager.Stop()
+
+	// 创建测试作业
+	jobFactory := testutils.NewJobFactory()
+	job := jobFactory.CreateSimpleJob()
+
+	// 序列化作业并保存到etcd
+	jobJSON, err := job.ToJSON()
+	require.NoError(t, err, "Failed to serialize job")
+
+	jobKey := constants.JobPrefix + job.ID
+	etcdClient, err := testutils.TestEtcdClient()
+	require.NoError(t, err, "Failed to create etcd client")
+	defer etcdClient.Close()
+
+	err = etcdClient.Put(jobKey, jobJSON)
+	require.NoError(t, err, "Failed to save job to etcd")
+
+	// 等待作业被发现
+	time.Sleep(500 * time.Millisecond)
+
+	// 报告运行状态
+	err = jobManager.ReportJobStatus(job, constants.JobStatusRunning)
+	assert.NoError(t, err, "ReportJobStatus should not return an error")
+
+	// 验证作业状态已在etcd中更新
+	jobJSON, err = etcdClient.Get(jobKey)
+	require.NoError(t, err, "Failed to get job from etcd")
+
+	updatedJob, err := models.FromJSON(jobJSON)
+	require.NoError(t, err, "Failed to deserialize job")
+
+	assert.Equal(t, constants.JobStatusRunning, updatedJob.Status, "Job status should be updated to running")
+
+	// 验证作业在运行作业列表中
+	runningJobs, err := jobManager.ListRunningJobs()
+	assert.NoError(t, err, "ListRunningJobs should not return an error")
+	foundJob := false
+	for _, rj := range runningJobs {
+		if rj.ID == job.ID {
+			foundJob = true
+			break
+		}
+	}
+	require.True(t, foundJob, "Job should be in running jobs list")
+
+	// 报告完成状态
+	err = jobManager.ReportJobStatus(job, constants.JobStatusSucceeded)
+	assert.NoError(t, err, "ReportJobStatus should not return an error")
+
+	// 验证作业已从运行作业列表中移除
+	runningJobs, err = jobManager.ListRunningJobs()
+	assert.NoError(t, err, "ListRunningJobs should not return an error")
+	assert.NotContains(t, runningJobs, job, "Job should not be in running jobs list")
+}
+
+func TestKillJob(t *testing.T) {
+	// 创建作业管理器
+	workerID := testutils.GenerateUniqueID("worker")
+	jobManager := createTestJobManager(t, workerID)
+	defer jobManager.Stop()
+
+	// 创建测试作业
+	jobFactory := testutils.NewJobFactory()
+	job := jobFactory.CreateSimpleJob()
+	job.Status = constants.JobStatusRunning
+
+	// 保存作业到etcd
+	jobJSON, err := job.ToJSON()
+	require.NoError(t, err, "Failed to serialize job")
+
+	etcdClient, err := testutils.TestEtcdClient()
+	require.NoError(t, err, "Failed to create etcd client")
+	defer etcdClient.Close()
+
+	err = etcdClient.Put(constants.JobPrefix+job.ID, jobJSON)
+	require.NoError(t, err, "Failed to save job to etcd")
+
+	// 发送终止信号
+	err = jobManager.KillJob(job.ID)
+	assert.NoError(t, err, "KillJob should not return an error")
+
+	// 验证终止信号已发送到etcd
+	killKey := constants.JobPrefix + job.ID + "/kill"
+	killSignal, err := etcdClient.Get(killKey)
+	assert.NoError(t, err, "Failed to get kill signal from etcd")
+	assert.NotEmpty(t, killSignal, "Kill signal should be set in etcd")
+}
+
+func TestIsJobAssignedToWorker(t *testing.T) {
+	// 创建作业管理器
+	workerID := testutils.GenerateUniqueID("worker")
+	jobManager := createTestJobManager(t, workerID)
+	defer jobManager.Stop()
+
+	// 创建测试作业工厂
+	jobFactory := testutils.NewJobFactory()
+
+	// 测试1：作业显式分配给此worker
+	job1 := jobFactory.CreateSimpleJob()
+	job1.Env = map[string]string{
+		"WORKER_ID": workerID,
+	}
+	assert.True(t, jobManager.IsJobAssignedToWorker(job1),
+		"Job with matching WORKER_ID should be assigned to this worker")
+
+	// 测试2：作业显式分配给另一个worker
+	job2 := jobFactory.CreateSimpleJob()
+	job2.Env = map[string]string{
+		"WORKER_ID": "different-worker-id",
+	}
+	assert.False(t, jobManager.IsJobAssignedToWorker(job2),
+		"Job assigned to a different worker should not be assigned to this worker")
+
+	// 测试3：没有显式分配worker的作业（应默认为true）
+	job3 := jobFactory.CreateSimpleJob()
+	assert.True(t, jobManager.IsJobAssignedToWorker(job3),
+		"Job with no worker assignment should be assignable to any worker")
+
+	// 测试4：运行状态的作业应分配给正在运行它的worker
+	job4 := jobFactory.CreateSimpleJob()
+	job4.Status = constants.JobStatusRunning
+	job4.Env = map[string]string{
+		"ASSIGNED_WORKER_ID": workerID,
+	}
+	assert.True(t, jobManager.IsJobAssignedToWorker(job4),
+		"Running job assigned to this worker should be recognized")
+}

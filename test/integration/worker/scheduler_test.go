@@ -375,3 +375,79 @@ func TestConcurrentJobExecution(t *testing.T) {
 		assert.True(t, executedJobs[job.ID], "Job should have been executed")
 	}
 }
+
+// TestJobEventHandling 测试调度器如何响应作业事件
+func TestJobEventHandling(t *testing.T) {
+	// 设置测试环境
+	etcdClient, mongoClient := testutils.SetupTestEnvironment(t)
+	defer testutils.TeardownTestEnvironment(t, etcdClient, mongoClient)
+
+	// 创建 WorkerJobManager
+	workerID := testutils.GenerateUniqueID("worker")
+	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
+	err := jobManager.Start()
+	require.NoError(t, err, "Failed to start job manager")
+	defer jobManager.Stop()
+
+	// 创建 LockManager
+	lockManager := joblock.NewLockManager(etcdClient, workerID)
+	err = lockManager.Start()
+	require.NoError(t, err, "Failed to start lock manager")
+	defer lockManager.Stop()
+
+	// 创建执行通道
+	executed := make(chan string, 10)
+	executionFunc := func(job *scheduler.ScheduledJob) error {
+		executed <- job.Job.ID
+		return nil
+	}
+
+	// 创建调度器
+	sched := scheduler.NewScheduler(jobManager, lockManager, executionFunc)
+	err = sched.Start()
+	require.NoError(t, err, "Failed to start scheduler")
+	defer sched.Stop()
+
+	// 创建作业工厂
+	jobFactory := testutils.NewJobFactory()
+	job := jobFactory.CreateSimpleJob()
+
+	// 将作业保存到etcd以模拟来自主节点的作业事件
+	jobJSON, err := job.ToJSON()
+	require.NoError(t, err, "Failed to serialize job")
+
+	// 将worker ID添加到作业环境中以将其分配给此worker
+	if job.Env == nil {
+		job.Env = make(map[string]string)
+	}
+	job.Env["WORKER_ID"] = workerID
+
+	// 保存到etcd以触发作业事件
+	err = etcdClient.Put(job.Key(), jobJSON)
+	require.NoError(t, err, "Failed to save job to etcd")
+
+	// 等待作业被调度器拾取
+	time.Sleep(2 * time.Second)
+
+	// 检查作业是否已添加到调度器
+	jobs := sched.ListJobs()
+	assert.GreaterOrEqual(t, len(jobs), 1, "Job should be added to scheduler")
+
+	// 如果我们从etcd中删除作业，它应该从调度器中删除
+	err = etcdClient.Delete(job.Key())
+	require.NoError(t, err, "Failed to delete job from etcd")
+
+	// 等待作业被移除
+	time.Sleep(2 * time.Second)
+
+	// 检查作业是否已从调度器中移除
+	jobs = sched.ListJobs()
+	foundJob := false
+	for _, j := range jobs {
+		if j.Job.ID == job.ID {
+			foundJob = true
+			break
+		}
+	}
+	assert.False(t, foundJob, "Job should be removed from scheduler")
+}

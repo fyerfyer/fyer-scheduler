@@ -3,6 +3,8 @@ package testutils
 import (
 	"context"
 	"fmt"
+	"github.com/fyerfyer/fyer-scheduler/pkg/common/repo"
+	"github.com/fyerfyer/fyer-scheduler/pkg/master/jobmgr"
 	"github.com/fyerfyer/fyer-scheduler/pkg/worker/register"
 	"github.com/stretchr/testify/mock"
 	"go.mongodb.org/mongo-driver/bson"
@@ -172,6 +174,64 @@ func CreateTestWorker(etcdClient *utils.EtcdClient, workerID string, labels map[
 	}
 
 	return workerRegister, nil
+}
+
+// CreateTestJobRepo 创建用于测试的作业仓库
+func CreateTestJobRepo(t *testing.T, etcdClient *utils.EtcdClient, mongoClient *utils.MongoDBClient) repo.IJobRepo {
+	return repo.NewJobRepo(etcdClient, mongoClient)
+}
+
+// CreateTestWorkerRepo 创建用于测试的worker仓库
+func CreateTestWorkerRepo(t *testing.T, etcdClient *utils.EtcdClient, mongoClient *utils.MongoDBClient) repo.IWorkerRepo {
+	return repo.NewWorkerRepo(etcdClient, mongoClient)
+}
+
+// CreateTestLogRepo 创建用于测试的日志仓库
+func CreateTestLogRepo(t *testing.T, mongoClient *utils.MongoDBClient) repo.ILogRepo {
+	return repo.NewLogRepo(mongoClient)
+}
+
+// CreateTestJobManager 创建用于测试的作业管理器
+func CreateTestJobManager(t *testing.T, jobRepo repo.IJobRepo, logRepo repo.ILogRepo, workerRepo repo.IWorkerRepo, etcdClient *utils.EtcdClient) jobmgr.JobManager {
+	manager := jobmgr.NewJobManager(jobRepo, logRepo, workerRepo, etcdClient)
+	err := manager.Start()
+	require.NoError(t, err, "Failed to start job manager")
+
+	// 注册清理函数，在测试完成时停止管理器
+	t.Cleanup(func() {
+		manager.Stop()
+	})
+
+	return manager
+}
+
+// CreateTestWorkerSelector 创建用于测试的worker选择器
+func CreateTestWorkerSelector(t *testing.T, workerRepo repo.IWorkerRepo) jobmgr.IWorkerSelector {
+	return jobmgr.NewWorkerSelector(workerRepo, jobmgr.LeastJobsStrategy)
+}
+
+// CreateTestScheduler 创建用于测试的调度器
+func CreateTestScheduler(t *testing.T, jobMgr jobmgr.JobManager, workerRepo repo.IWorkerRepo) jobmgr.IScheduler {
+	scheduler := jobmgr.NewScheduler(jobMgr, workerRepo, 1*time.Second)
+	err := scheduler.Start()
+	require.NoError(t, err, "Failed to start scheduler")
+
+	// 注册清理函数，在测试完成时停止调度器
+	t.Cleanup(func() {
+		scheduler.Stop()
+	})
+
+	return scheduler
+}
+
+// CreateTestJobOperations 创建用于测试的作业操作
+func CreateTestJobOperations(t *testing.T, jobMgr jobmgr.JobManager, workerRepo repo.IWorkerRepo, logRepo repo.ILogRepo) *jobmgr.JobOperations {
+	// 创建依赖项
+	workerSelector := CreateTestWorkerSelector(t, workerRepo)
+	scheduler := CreateTestScheduler(t, jobMgr, workerRepo)
+
+	// 创建作业操作
+	return jobmgr.NewJobOperations(jobMgr, workerRepo, logRepo, workerSelector, scheduler)
 }
 
 func MockAny() interface{} {
