@@ -85,36 +85,40 @@
                 <h4>Cron Expression Format</h4>
                 <p>Cron expressions use the following format: <code>* * * * *</code></p>
                 <table class="cron-help-table">
-                  <tr>
-                    <th>Field</th>
-                    <th>Values</th>
-                    <th>Example</th>
-                  </tr>
-                  <tr>
-                    <td>Minute</td>
-                    <td>0-59</td>
-                    <td>0 = top of the hour</td>
-                  </tr>
-                  <tr>
-                    <td>Hour</td>
-                    <td>0-23</td>
-                    <td>0 = midnight</td>
-                  </tr>
-                  <tr>
-                    <td>Day of Month</td>
-                    <td>1-31</td>
-                    <td>15 = 15th day</td>
-                  </tr>
-                  <tr>
-                    <td>Month</td>
-                    <td>1-12</td>
-                    <td>1 = January</td>
-                  </tr>
-                  <tr>
-                    <td>Day of Week</td>
-                    <td>0-6</td>
-                    <td>0 = Sunday</td>
-                  </tr>
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Values</th>
+                      <th>Example</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Minute</td>
+                      <td>0-59</td>
+                      <td>0 = top of the hour</td>
+                    </tr>
+                    <tr>
+                      <td>Hour</td>
+                      <td>0-23</td>
+                      <td>0 = midnight</td>
+                    </tr>
+                    <tr>
+                      <td>Day of Month</td>
+                      <td>1-31</td>
+                      <td>15 = 15th day</td>
+                    </tr>
+                    <tr>
+                      <td>Month</td>
+                      <td>1-12</td>
+                      <td>1 = January</td>
+                    </tr>
+                    <tr>
+                      <td>Day of Week</td>
+                      <td>0-6</td>
+                      <td>0 = Sunday</td>
+                    </tr>
+                  </tbody>
                 </table>
                 <p>Common examples:</p>
                 <ul>

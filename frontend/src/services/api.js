@@ -2,7 +2,7 @@ import axios from 'axios';
 
 // Create axios instance
 const api = axios.create({
-    baseURL: process.env.VUE_APP_API_URL || 'http://localhost:8080/api/v1',
+    baseURL: process.env.VUE_APP_API_URL || 'http://localhost:8081/api/v1',
     timeout: 10000,
     headers: {
         'Content-Type': 'application/json',
@@ -30,32 +30,18 @@ api.interceptors.response.use(
     response => {
         // Extract data from the API's response wrapper
         if (response.data && response.data.success) {
-            return response.data.data;
+            return response.data.data || response.data;
         }
         return response.data;
     },
     error => {
-        const errorResponse = error.response;
-
-        if (errorResponse && errorResponse.status) {
-            switch (errorResponse.status) {
-                case 401:
-                    console.error('Unauthorized access');
-                    break;
-                case 404:
-                    console.error('Resource not found');
-                    break;
-                case 500:
-                    console.error('Server error');
-                    break;
-                default:
-                    console.error('API error:', errorResponse.data);
-            }
-        } else {
-            console.error('Network error or API service unavailable');
-        }
-
-        return Promise.reject(error);
+        // Handle error response
+        const errorResponse = {
+            message: error.message || 'Unknown error occurred',
+            status: error.response ? error.response.status : null,
+            data: error.response ? error.response.data : null
+        };
+        return Promise.reject(errorResponse);
     }
 );
 

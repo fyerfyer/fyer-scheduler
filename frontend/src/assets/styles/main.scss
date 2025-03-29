@@ -1,11 +1,12 @@
-@import './variables.scss';
+@use './variables.scss' as vars;
+@use 'sass:color';
 
 /* Global styles */
 body {
-  font-family: $font-family;
-  font-size: $font-size-base;
-  color: $text-color;
-  background-color: $bg-color;
+  font-family: vars.$font-family;
+  font-size: vars.$font-size-base;
+  color: vars.$text-color;
+  background-color: vars.$bg-color;
   line-height: 1.5;
 }
 
@@ -17,7 +18,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 a {
-  color: $primary-color;
+  color: vars.$primary-color;
   text-decoration: none;
 
   &:hover {
@@ -27,7 +28,7 @@ a {
 
 .card {
   background: white;
-  border-radius: $border-radius-base;
+  border-radius: vars.$border-radius-base;
   padding: 16px;
   margin-bottom: 16px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
@@ -47,7 +48,7 @@ a {
 
 .page-content {
   background: white;
-  border-radius: $border-radius-base;
+  border-radius: vars.$border-radius-base;
   padding: 24px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
@@ -57,37 +58,37 @@ a {
   align-items: center;
   justify-content: center;
   padding: 8px 16px;
-  border-radius: $border-radius-base;
-  border: 1px solid $border-color;
+  border-radius: vars.$border-radius-base;
+  border: 1px solid vars.$border-color;
   background: white;
-  font-size: $font-size-base;
+  font-size: vars.$font-size-base;
   cursor: pointer;
   transition: all 0.2s;
 
   &:hover {
-    border-color: $primary-color;
-    color: $primary-color;
+    border-color: vars.$primary-color;
+    color: vars.$primary-color;
   }
 
   &.btn-primary {
-    background: $primary-color;
-    border-color: $primary-color;
+    background: vars.$primary-color;
+    border-color: vars.$primary-color;
     color: white;
 
     &:hover {
-      background: darken($primary-color, 10%);
-      border-color: darken($primary-color, 10%);
+      background: color.adjust(vars.$primary-color, $lightness: -10%);
+      border-color: color.adjust(vars.$primary-color, $lightness: -10%);
     }
   }
 
   &.btn-danger {
-    background: $error-color;
-    border-color: $error-color;
+    background: vars.$error-color;
+    border-color: vars.$error-color;
     color: white;
 
     &:hover {
-      background: darken($error-color, 10%);
-      border-color: darken($error-color, 10%);
+      background: color.adjust(vars.$error-color, $lightness: -10%);
+      border-color: color.adjust(vars.$error-color, $lightness: -10%);
     }
   }
 }
@@ -99,7 +100,7 @@ a {
   th, td {
     padding: 12px 8px;
     text-align: left;
-    border-bottom: 1px solid $border-color;
+    border-bottom: 1px solid vars.$border-color;
   }
 
   th {
