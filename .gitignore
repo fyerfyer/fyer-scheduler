@@ -34,3 +34,6 @@ go.work.sum
 
 /logs
 /logs/
+
+/node_modules
+/node_modules/

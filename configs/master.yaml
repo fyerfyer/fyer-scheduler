@@ -8,7 +8,7 @@ version: "1.0.0"
 # 服务器配置
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 8081
 
 # etcd配置
 etcd:
