@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/fyerfyer/fyer-scheduler/pkg/common/repo"
 	"github.com/fyerfyer/fyer-scheduler/pkg/master/jobmgr"
+	"github.com/fyerfyer/fyer-scheduler/pkg/master/workermgr"
 	"github.com/fyerfyer/fyer-scheduler/pkg/worker/register"
 	"github.com/stretchr/testify/mock"
 	"go.mongodb.org/mongo-driver/bson"
@@ -236,4 +237,18 @@ func CreateTestJobOperations(t *testing.T, jobMgr jobmgr.JobManager, workerRepo 
 
 func MockAny() interface{} {
 	return mock.Anything
+}
+
+// CreateTestWorkerManager 创建用于测试的WorkerManager
+func CreateTestWorkerManager(t *testing.T, workerRepo repo.IWorkerRepo, etcdClient *utils.EtcdClient) workermgr.WorkerManager {
+	manager := workermgr.NewWorkerManager(workerRepo, 10*time.Second, etcdClient)
+	err := manager.Start()
+	require.NoError(t, err, "Failed to start worker manager")
+
+	// 注册清理函数
+	t.Cleanup(func() {
+		manager.Stop()
+	})
+
+	return manager
 }
