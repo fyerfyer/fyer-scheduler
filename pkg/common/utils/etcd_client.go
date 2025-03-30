@@ -299,6 +299,10 @@ func (e *EtcdClient) TryAcquireLock(lockKey string, ttl int64) (clientv3.LeaseID
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.EtcdOpTimeout)*time.Second)
 		defer cancel()
 
+		Info("creating lease for lock", 
+            zap.String("lock_key", lockKey), 
+            zap.Int64("ttl", ttl))
+
 		lease, err := e.client.Grant(ctx, ttl)
 		if err != nil {
 			return fmt.Errorf("failed to create lease: %w", err)
@@ -312,19 +316,33 @@ func (e *EtcdClient) TryAcquireLock(lockKey string, ttl int64) (clientv3.LeaseID
 
 		resp, err := txn.Commit()
 		if err != nil {
+			// 如果事务失败，尝试撤销租约
+            _, _ = e.client.Revoke(context.Background(), lease.ID)
 			return fmt.Errorf("transaction failed: %w", err)
 		}
 
 		if !resp.Succeeded {
 			// 锁已被占用
+			// 尝试撤销租约
+            _, _ = e.client.Revoke(context.Background(), lease.ID)
 			return fmt.Errorf("lock already acquired by another client")
 		}
+
+		Info("lock acquired successfully", 
+            zap.String("lock_key", lockKey), 
+            zap.Int64("lease_id", int64(lease.ID)))
 
 		leaseID = lease.ID
 		return nil
 	}
 
 	err := e.withRetry(operation, "TryAcquireLock: "+lockKey)
+	if err != nil {
+		Error("failed to acquire lock after retries", 
+            zap.String("lock_key", lockKey), 
+            zap.Error(err))
+	}
+
 	return leaseID, err
 }
 

@@ -219,48 +219,42 @@ func (s *Scheduler) RemoveJob(jobID string) error {
 
 // TriggerJob 立即触发一个任务执行
 func (s *Scheduler) TriggerJob(jobID string) error {
-	// 先检查任务是否在队列中
-	var scheduledJob *ScheduledJob
-	var found bool
-
-	// 在队列中查找
-	jobs := s.jobQueue.GetAll()
-	for _, job := range jobs {
-		if job.Job.ID == jobID {
-			scheduledJob = job
-			found = true
-			break
-		}
-	}
-
-	// 如果不在队列中，可能是之前没有添加过
+	// 先获取作业
+	schedJob, found := s.GetJob(jobID)
 	if !found {
-		// 从Job Manager获取任务
+		// 如果在调度器中找不到，尝试从jobManager加载
 		job, err := s.jobManager.GetJob(jobID)
 		if err != nil {
-			return fmt.Errorf("job not found: %w", err)
+			return fmt.Errorf("failed to get job: %w", err)
 		}
 
-		// 创建临时调度任务
-		scheduledJob = &ScheduledJob{
-			Job:            job,
-			NextRunTime:    time.Now(), // 立即执行
-			IsRunning:      false,
-			ExecutionCount: 0,
+		// 检查作业是否分配给当前Worker
+		if !s.jobManager.IsJobAssignedToWorker(job) {
+			utils.Info("skipping job trigger - not assigned to this worker",
+				zap.String("job_id", jobID),
+				zap.String("worker_id", s.workerID))
+			return nil // 不是错误，只是这个worker不处理这个作业
+		}
+
+		// 继续执行...
+	} else {
+		// 作业已在调度器中，检查是否已分配给当前Worker
+		origJob, err := s.jobManager.GetJob(jobID)
+		if err == nil && !s.jobManager.IsJobAssignedToWorker(origJob) {
+			utils.Info("skipping job trigger - not assigned to this worker",
+				zap.String("job_id", jobID),
+				zap.String("worker_id", s.workerID))
+			return nil
 		}
 	}
 
-	// 检查任务是否正在运行
-	if _, ok := s.runningJobs.Load(jobID); ok {
-		return fmt.Errorf("job is already running")
-	}
-
-	// 执行任务
-	go s.executeJob(scheduledJob)
+	// 执行作业...
+	go s.executeJob(schedJob)
 
 	utils.Info("job triggered manually",
 		zap.String("job_id", jobID),
-		zap.String("name", scheduledJob.Job.Name))
+		zap.String("name", schedJob.Job.Name))
+
 	return nil
 }
 
@@ -338,17 +332,25 @@ func (s *Scheduler) UpdateJob(job *models.Job) error {
 func (s *Scheduler) GetJob(jobID string) (*ScheduledJob, bool) {
 	// 先检查正在运行的任务
 	if job, ok := s.runningJobs.Load(jobID); ok {
-		return job.(*ScheduledJob), true
+		scheduledJob := job.(*ScheduledJob)
+		utils.Debug("GetJob found running job",
+			zap.String("job_id", jobID),
+			zap.Bool("is_running", scheduledJob.IsRunning))
+		return scheduledJob, true
 	}
 
 	// 在队列中查找
 	jobs := s.jobQueue.GetAll()
 	for _, job := range jobs {
 		if job.Job.ID == jobID {
+			utils.Debug("GetJob found job in queue",
+				zap.String("job_id", jobID),
+				zap.Bool("is_running", job.IsRunning))
 			return job, true
 		}
 	}
 
+	utils.Debug("GetJob could not find job", zap.String("job_id", jobID))
 	return nil, false
 }
 
@@ -453,177 +455,260 @@ func (s *Scheduler) checkDueJobs(now time.Time) {
 
 // executeJob 执行单个任务
 func (s *Scheduler) executeJob(job *ScheduledJob) {
-	jobID := job.Job.ID
+	// 先打印详细日志
+	utils.Info("starting job execution",
+		zap.String("job_id", job.Job.ID),
+		zap.String("name", job.Job.Name),
+		zap.String("worker_id", s.workerID))
 
-	// 标记任务为运行中
-	job.IsRunning = true
-	s.runningJobs.Store(jobID, job)
-
-	// 更新调度器状态
-	s.updateStatus()
-
-	utils.Info("executing job",
-		zap.String("job_id", jobID),
-		zap.String("name", job.Job.Name))
-
-	// 获取任务锁
-	jobLock := s.lockManager.CreateLock(jobID)
-	job.Lock = jobLock
-
-	// 尝试获取锁
-	acquired, err := jobLock.TryLock()
-	if err != nil || !acquired {
-		utils.Error("failed to acquire job lock",
-			zap.String("job_id", jobID),
-			zap.Error(err))
-
-		// 标记任务为非运行状态并重新加入队列
-		job.IsRunning = false
-		s.runningJobs.Delete(jobID)
-
-		// 计算下一次执行时间
-		if job.Job.CronExpr != "" {
-			nextTime, err := s.cronParser.GetNextRunTime(job.Job.CronExpr, time.Now())
-			if err == nil {
-				job.NextRunTime = nextTime
-				s.jobQueue.Push(job)
-			}
-		}
-
-		s.updateStatus()
+	// 首先检查作业是否分配给当前Worker
+	if !s.jobManager.IsJobAssignedToWorker(job.Job) {
+		utils.Info("job not assigned to this worker, skipping execution",
+			zap.String("job_id", job.Job.ID),
+			zap.String("worker_id", s.workerID))
 		return
 	}
 
-	// 创建上下文，支持超时和取消
-	ctx := context.Background()
-	if s.options.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.options.Timeout)
-		defer cancel()
-	}
+	// 创建任务锁
+	lockOpts := joblock.FromLockOptions(joblock.DefaultLockOptions())
+	lockID := "job-" + job.Job.ID
+	lock := s.lockManager.CreateLock(lockID, lockOpts...)
 
-	// 执行任务前更新任务状态为运行中
-	job.Job.Status = constants.JobStatusRunning
-	s.jobManager.ReportJobStatus(job.Job, constants.JobStatusRunning)
+	utils.Info("attempting to acquire lock for job",
+		zap.String("job_id", job.Job.ID),
+		zap.String("lock_id", lockID),
+		zap.String("worker_id", s.workerID))
 
-	// 执行任务
-	startTime := time.Now()
-	err = s.executorFunc(job)
-
-	// 记录执行信息
-	job.ExecutionCount++
-	executionTime := time.Since(startTime)
-
-	// 任务完成后的处理
+	// 尝试获取锁
+	acquired, err := lock.TryLock()
 	if err != nil {
-		// 任务执行失败
-		utils.Error("job execution failed",
-			zap.String("job_id", jobID),
-			zap.String("name", job.Job.Name),
-			zap.Error(err),
-			zap.Duration("duration", executionTime))
-
-		// 更新任务状态为失败
-		job.Job.Status = constants.JobStatusFailed
-		job.Job.LastResult = err.Error()
-		s.jobManager.ReportJobStatus(job.Job, constants.JobStatusFailed)
-
-		// 是否需要重试
-		if s.options.FailStrategy == FailStrategyRetry && job.RetryCount < s.options.MaxRetries {
-			// 更新重试次数
-			job.RetryCount++
-
-			utils.Info("scheduling job retry",
-				zap.String("job_id", job.Job.ID),
-				zap.String("name", job.Job.Name),
-				zap.Int("retry_count", job.RetryCount),
-				zap.Int("max_retries", s.options.MaxRetries),
-				zap.Duration("retry_delay", s.options.RetryDelay))
-
-			// 创建新的调度任务
-			go func(retryJob *ScheduledJob) {
-				// 等待重试延迟
-				time.Sleep(s.options.RetryDelay)
-
-				if !s.isRunning {
-					return
-				}
-
-				// 重新执行任务
-				s.executeJob(retryJob)
-			}(job)
-
-			// 更新队列中的任务
-			s.jobQueue.Update(job)
-
-			// 释放锁
-			return
-		}
-	} else {
-		// 任务执行成功
-		job.RetryCount = 0
-		utils.Info("job execution completed successfully",
-			zap.String("job_id", jobID),
-			zap.String("name", job.Job.Name),
-			zap.Duration("duration", executionTime))
-
-		// 更新任务状态为成功
-		job.Job.Status = constants.JobStatusSucceeded
-		job.Job.LastResult = "success"
-		s.jobManager.ReportJobStatus(job.Job, constants.JobStatusSucceeded)
+		utils.Error("failed to acquire job lock",
+			zap.String("job_id", job.Job.ID),
+			zap.Error(err))
+		return
 	}
 
-	// 释放锁
-	_ = jobLock.Unlock()
+	if !acquired {
+		utils.Info("job lock already acquired by another worker, skipping execution",
+			zap.String("job_id", job.Job.ID),
+			zap.String("worker_id", s.workerID))
+		return
+	}
 
-	// 处理下一次调度
-	s.scheduleNextRun(job)
+	// 成功获取锁，记录日志
+	utils.Info("job lock acquired successfully",
+		zap.String("job_id", job.Job.ID),
+		zap.String("worker_id", s.workerID),
+		zap.String("lock_id", lockID))
 
-	// 任务执行完毕，从运行映射中移除
-	job.IsRunning = false
-	s.runningJobs.Delete(jobID)
+	// 标记任务为运行中
+	job.Lock = lock
+	job.IsRunning = true
+	job.ExecutionCount++
+	job.LastExecutionID = fmt.Sprintf("%s-%d", job.Job.ID, time.Now().Unix())
+
+	// 添加到运行映射
+	s.runningJobs.Store(job.Job.ID, job)
 
 	// 更新调度器状态
 	s.updateStatus()
+
+	// 创建上下文，支持超时和取消
+	_, cancel := context.WithTimeout(context.Background(), s.options.Timeout)
+	defer cancel()
+
+	// 执行任务前更新任务状态为运行中
+	err = s.jobManager.ReportJobStatus(job.Job, constants.JobStatusRunning)
+	if err != nil {
+		utils.Warn("failed to report job running status",
+			zap.String("job_id", job.Job.ID),
+			zap.Error(err))
+	}
+
+	// 设置作业的开始执行时间
+	startTime := time.Now()
+	job.Job.LastRunTime = startTime
+
+	// 执行任务
+	utils.Info("executing job",
+		zap.String("job_id", job.Job.ID),
+		zap.String("name", job.Job.Name),
+		zap.String("worker_id", s.workerID))
+
+	var execErr error
+	if s.executorFunc != nil {
+		execErr = s.executorFunc(job)
+	}
+
+	// 记录结束时间
+	endTime := time.Now()
+
+	// 任务完成后的处理
+	var status string
+	if execErr != nil {
+		status = constants.JobStatusFailed
+		utils.Error("job execution failed",
+			zap.String("job_id", job.Job.ID),
+			zap.String("name", job.Job.Name),
+			zap.Error(execErr))
+
+		// 处理失败策略
+		if s.options.FailStrategy == FailStrategyRetry && job.RetryCount < s.options.MaxRetries {
+			job.RetryCount++
+			utils.Info("scheduling job for retry",
+				zap.String("job_id", job.Job.ID),
+				zap.Int("retry_count", job.RetryCount),
+				zap.Int("max_retries", s.options.MaxRetries))
+
+			// 重要修改：直接使用goroutine处理重试，而不是依赖调度周期
+			if job.RetryCount <= s.options.MaxRetries {
+				go func(retryJob *ScheduledJob) {
+					// 等待重试延迟
+					time.Sleep(s.options.RetryDelay)
+
+					// 检查调度器是否还在运行
+					if !s.isRunning {
+						return
+					}
+
+					// 重新执行任务
+					utils.Info("retrying job execution",
+						zap.String("job_id", retryJob.Job.ID),
+						zap.Int("retry_attempt", retryJob.RetryCount))
+					s.executeJob(retryJob)
+				}(job)
+			}
+		} else {
+			utils.Info("no more retries for job",
+				zap.String("job_id", job.Job.ID),
+				zap.Int("retry_count", job.RetryCount))
+
+			// 不重试，重置重试计数
+			job.RetryCount = 0
+		}
+	} else {
+		status = constants.JobStatusSucceeded
+		utils.Info("job execution succeeded",
+			zap.String("job_id", job.Job.ID),
+			zap.String("name", job.Job.Name),
+			zap.Duration("duration", endTime.Sub(startTime)))
+
+		// 成功执行后重置重试计数
+		job.RetryCount = 0
+	}
+
+	// 释放锁 - 确保在状态更新之前释放锁
+	if job.Lock != nil {
+		utils.Info("releasing job lock",
+			zap.String("job_id", job.Job.ID),
+			zap.String("worker_id", s.workerID))
+
+		err = job.Lock.Unlock()
+		if err != nil {
+			utils.Error("failed to release job lock",
+				zap.String("job_id", job.Job.ID),
+				zap.Error(err))
+		} else {
+			utils.Info("job lock released successfully",
+				zap.String("job_id", job.Job.ID),
+				zap.String("worker_id", s.workerID))
+		}
+		job.Lock = nil
+	}
+
+	// 处理下一次调度 - 只有当不是重试的情况下
+	if execErr == nil || job.RetryCount == 0 {
+		s.scheduleNextRun(job)
+	}
+
+	// 更新作业状态
+	err = s.jobManager.ReportJobStatus(job.Job, status)
+	if err != nil {
+		utils.Warn("failed to report job status",
+			zap.String("job_id", job.Job.ID),
+			zap.String("status", status),
+			zap.Error(err))
+	}
+
+	// 设置作业的运行状态
+	utils.Info("setting job running state to false",
+		zap.String("job_id", job.Job.ID),
+		zap.Bool("current_is_running", job.IsRunning))
+	job.IsRunning = false
+
+	// 更新队列中的任务状态，确保一致性
+	queueJob := &ScheduledJob{
+		Job:             job.Job,
+		NextRunTime:     job.NextRunTime,
+		IsRunning:       false,
+		RetryCount:      job.RetryCount,
+		ExecutionCount:  job.ExecutionCount,
+		LastExecutionID: job.LastExecutionID,
+	}
+
+	// 只有在不是重试过程中才更新队列
+	if job.RetryCount == 0 {
+		err = s.jobQueue.Update(queueJob)
+		if err != nil {
+			utils.Warn("failed to update job in queue",
+				zap.String("job_id", job.Job.ID),
+				zap.Error(err))
+		}
+	}
+
+	// 从运行映射中移除
+	s.runningJobs.Delete(job.Job.ID)
+
+	// 更新调度器状态
+	s.updateStatus()
+
+	utils.Info("job execution completed",
+		zap.String("job_id", job.Job.ID),
+		zap.String("status", status),
+		zap.String("worker_id", s.workerID))
 }
 
 // scheduleNextRun 计算并安排任务的下一次执行
 func (s *Scheduler) scheduleNextRun(job *ScheduledJob) {
+	// 如果是重试任务，设置下一次执行时间为当前时间+重试延迟
+	if job.RetryCount > 0 {
+		job.NextRunTime = time.Now().Add(s.options.RetryDelay)
+		utils.Info("scheduling job retry",
+			zap.String("job_id", job.Job.ID),
+			zap.Int("retry_count", job.RetryCount),
+			zap.Time("next_run_time", job.NextRunTime))
+		return
+	}
+
 	// 仅当作业有cron表达式时才继续
 	if job.Job.CronExpr == "" {
 		return
 	}
 
 	// 计算下一次运行时间
-	now := time.Now()
-	nextRunTime, err := s.cronParser.GetNextRunTime(job.Job.CronExpr, now)
+	schedule, err := s.cronParser.Parse(job.Job.CronExpr)
 	if err != nil {
-		utils.Error("failed to calculate next run time",
+		utils.Error("failed to parse cron expression",
 			zap.String("job_id", job.Job.ID),
-			zap.String("cron", job.Job.CronExpr),
+			zap.String("cron_expr", job.Job.CronExpr),
 			zap.Error(err))
 		return
 	}
 
 	// 更新作业的下一次运行时间
-	job.NextRunTime = nextRunTime
+	job.NextRunTime = schedule.Next(time.Now())
+	utils.Info("calculated next run time",
+		zap.String("job_id", job.Job.ID),
+		zap.Time("next_run_time", job.NextRunTime))
 
 	// 为下一次执行重置重试计数
 	job.RetryCount = 0
 
 	// 检查作业是否已经在队列中，如果在则更新它
 	if s.jobQueue.Contains(job.Job.ID) {
-		err = s.jobQueue.Update(job)
+		err := s.jobQueue.Update(job)
 		if err != nil {
 			utils.Error("failed to update job in queue",
-				zap.String("job_id", job.Job.ID),
-				zap.Error(err))
-		}
-	} else {
-		// 否则将其添加到队列中
-		err = s.jobQueue.Push(job)
-		if err != nil {
-			utils.Error("failed to re-queue job for next execution",
 				zap.String("job_id", job.Job.ID),
 				zap.Error(err))
 		}

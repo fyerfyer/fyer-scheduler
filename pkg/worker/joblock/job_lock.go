@@ -59,6 +59,9 @@ func (j *JobLock) TryLock() (bool, error) {
 
 	// 如果已经持有锁，直接返回成功
 	if j.isLocked {
+		utils.Debug("already holding lock, returning success",
+            zap.String("job_id", j.jobID),
+            zap.String("worker_id", j.workerID))
 		return true, nil
 	}
 
@@ -66,6 +69,12 @@ func (j *JobLock) TryLock() (bool, error) {
 	var err error
 	var success bool
 	var leaseID clientv3.LeaseID
+
+	utils.Info("attempting to acquire lock",
+        zap.String("job_id", j.jobID),
+        zap.String("worker_id", j.workerID),
+        zap.String("lock_key", j.lockKey),
+        zap.Int64("ttl", j.ttl))
 
 	for i := 0; i < j.maxRetries; i++ {
 		// 尝试获取锁
@@ -83,6 +92,11 @@ func (j *JobLock) TryLock() (bool, error) {
 
 		// 如果达到最大重试次数，返回错误
 		if i == j.maxRetries-1 {
+			utils.Error("max retry attempts reached",
+                zap.String("job_id", j.jobID),
+                zap.String("worker_id", j.workerID),
+                zap.Int("max_retries", j.maxRetries),
+                zap.Error(err))
 			return false, fmt.Errorf("failed to acquire lock after %d attempts: %w", j.maxRetries, err)
 		}
 
@@ -103,6 +117,10 @@ func (j *JobLock) TryLock() (bool, error) {
 			zap.Int64("lease_id", int64(j.leaseID)))
 		return true, nil
 	}
+
+	utils.Info("failed to acquire lock",
+        zap.String("job_id", j.jobID),
+        zap.String("worker_id", j.workerID))
 
 	return false, fmt.Errorf("failed to acquire lock for job %s", j.jobID)
 }
