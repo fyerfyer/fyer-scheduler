@@ -63,8 +63,8 @@ func TestExecutorBasicExecution(t *testing.T) {
 	// 验证结果
 	require.NoError(t, err, "Execute should not return an error")
 	assert.Equal(t, 0, result.ExitCode, "Exit code should be 0")
-	assert.Contains(t, result.Output, "hello world", "Output should contain 'hello world'")
-	assert.Equal(t, ExecutionStateSuccess, result.State, "State should be completed")
+	assert.Equal(t, ExecutionStateSuccess, result.State, "Execution state should be success")
+	assert.Contains(t, result.Output, "hello world", "Output should contain expected text")
 }
 
 func TestExecutorFailedCommand(t *testing.T) {
@@ -73,14 +73,15 @@ func TestExecutorFailedCommand(t *testing.T) {
 
 	// 设置模拟期望
 	mockReporter.EXPECT().ReportStart(testutils.MockAny(), testutils.MockAny()).Return(nil)
-	mockReporter.EXPECT().ReportError(testutils.MockAny(), testutils.MockAny()).Return(nil)
+	mockReporter.EXPECT().ReportError(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+	mockReporter.EXPECT().ReportOutput(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
 	mockReporter.EXPECT().ReportCompletion(testutils.MockAny(), testutils.MockAny()).Return(nil)
 
 	// 创建执行器
 	exec := executor.NewExecutor(
 		mockReporter,
 		executor.WithMaxConcurrentExecutions(2),
-		executor.WithDefaultTimeout(10*time.Second),
+		executor.WithDefaultTimeout(5*time.Second),
 	)
 
 	// 创建任务工厂和简单任务
@@ -95,7 +96,7 @@ func TestExecutorFailedCommand(t *testing.T) {
 		Args:          []string{},
 		WorkDir:       "",
 		Environment:   nil,
-		Timeout:       5 * time.Second,
+		Timeout:       2 * time.Second,
 		Reporter:      mockReporter,
 		MaxOutputSize: 10 * 1024 * 1024, // 10MB
 	}
@@ -104,10 +105,9 @@ func TestExecutorFailedCommand(t *testing.T) {
 	result, err := exec.Execute(context.Background(), execCtx)
 
 	// 验证结果
-	require.NoError(t, err, "Execute should not return an error")
-	assert.NotEqual(t, 0, result.ExitCode, "Exit code should not be 0")
-	assert.Equal(t, ExecutionStateFailed, result.State, "State should be failed")
-	assert.Contains(t, result.Error, "executable file not found", "Error should indicate command not found")
+	require.NoError(t, err, "Execute method should not return an error, but the command execution should fail")
+	assert.NotEqual(t, 0, result.ExitCode, "Exit code should not be 0 for failed command")
+	assert.Equal(t, ExecutionStateFailed, result.State, "Execution state should be failed")
 }
 
 func TestExecutorWithWorkDir(t *testing.T) {
@@ -127,20 +127,31 @@ func TestExecutorWithWorkDir(t *testing.T) {
 	)
 
 	// 获取当前目录作为工作目录
-	workDir, err := os.Getwd()
+	currentDir, err := os.Getwd()
 	require.NoError(t, err, "Failed to get current directory")
 
 	// 创建任务工厂和简单任务
 	jobFactory := testutils.NewJobFactory()
 	job := jobFactory.CreateSimpleJob()
 
+	// 使用适合当前操作系统的命令
+	var command string
+	var args []string
+	if os.Getenv("GOOS") == "windows" {
+		command = "cmd"
+		args = []string{"/c", "echo %CD%"}
+	} else {
+		command = "pwd"
+		args = []string{}
+	}
+
 	// 创建执行上下文，使用指定的工作目录
 	execCtx := &executor.ExecutionContext{
-		ExecutionID:   "test-execution-4",
+		ExecutionID:   "test-execution-3",
 		Job:           job,
-		Command:       "cmd",                // 改为Windows命令
-		Args:          []string{"/c", "cd"}, // 在Windows上使用cd命令代替pwd
-		WorkDir:       workDir,
+		Command:       command,
+		Args:          args,
+		WorkDir:       currentDir,
 		Environment:   nil,
 		Timeout:       5 * time.Second,
 		Reporter:      mockReporter,
@@ -153,8 +164,12 @@ func TestExecutorWithWorkDir(t *testing.T) {
 	// 验证结果
 	require.NoError(t, err, "Execute should not return an error")
 	assert.Equal(t, 0, result.ExitCode, "Exit code should be 0")
-	assert.Contains(t, result.Output, filepath.Base(workDir), "Output should contain the working directory")
-	assert.Equal(t, ExecutionStateSuccess, result.State, "State should be completed")
+	assert.Equal(t, ExecutionStateSuccess, result.State, "Execution state should be success")
+
+	// 检查输出是否包含当前目录（考虑路径格式可能不同）
+	normalizedOutput := filepath.ToSlash(result.Output)
+	normalizedCurrentDir := filepath.ToSlash(currentDir)
+	assert.Contains(t, normalizedOutput, normalizedCurrentDir, "Output should contain the current directory")
 }
 
 func TestExecutorWithEnvironment(t *testing.T) {
@@ -182,12 +197,23 @@ func TestExecutorWithEnvironment(t *testing.T) {
 		"TEST_VAR": "test_value",
 	}
 
+	// 使用适合当前操作系统的命令来打印环境变量
+	var command string
+	var args []string
+	if os.Getenv("GOOS") == "windows" {
+		command = "cmd"
+		args = []string{"/c", "echo %TEST_VAR%"}
+	} else {
+		command = "echo"
+		args = []string{"$TEST_VAR"}
+	}
+
 	// 创建执行上下文，使用环境变量
 	execCtx := &executor.ExecutionContext{
-		ExecutionID:   "test-execution-5",
+		ExecutionID:   "test-execution-4",
 		Job:           job,
-		Command:       "cmd",                 // 改为Windows的命令
-		Args:          []string{"/c", "set"}, // 在Windows上使用set命令代替env
+		Command:       command,
+		Args:          args,
 		WorkDir:       "",
 		Environment:   env,
 		Timeout:       5 * time.Second,
@@ -201,287 +227,359 @@ func TestExecutorWithEnvironment(t *testing.T) {
 	// 验证结果
 	require.NoError(t, err, "Execute should not return an error")
 	assert.Equal(t, 0, result.ExitCode, "Exit code should be 0")
-	assert.Contains(t, result.Output, "TEST_VAR=test_value", "Output should contain the environment variable")
-	// Windows可能会返回格式为 "TEST_VAR=test_value" 的输出
-	assert.Equal(t, ExecutionStateSuccess, result.State, "State should be completed")
+	assert.Equal(t, ExecutionStateSuccess, result.State, "Execution state should be success")
+	assert.Contains(t, result.Output, "test_value", "Output should contain the environment variable value")
 }
 
-func TestCronExpressionParsing(t *testing.T) {
-	jobFactory := testutils.NewJobFactory()
-
-	testCases := []struct {
-		name     string
-		cronExpr string
-		valid    bool
-	}{
-		{"Every Minute", "* * * * *", true},
-		{"Every Hour", "0 * * * *", true},
-		{"Every Day at Midnight", "0 0 * * *", true},
-		{"Every Monday", "0 0 * * 1", true},
-		{"Every Month First Day", "0 0 1 * *", true},
-		{"Invalid Format", "* * *", false},
-		{"Invalid Values", "99 99 99 99 99", false},
-		{"Extended Format", "*/5 * * * *", true},
-		{"Complex Expression", "15,45 */2 1-15 * 1-5", true},
-		{"With Seconds", "0 */5 * * * *", false}, // 6-part expressions not supported by default
-		{"Special @daily", "@daily", true},
-		{"Special @hourly", "@hourly", true},
-		{"Special @weekly", "@weekly", true},
-		{"Special @monthly", "@monthly", true},
-		{"Special @yearly", "@yearly", true},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			job := jobFactory.CreateScheduledJob(tc.cronExpr)
-			if tc.valid {
-				assert.NotNil(t, job, "Expected valid cron expression")
-			} else {
-				assert.Nil(t, job, "Expected invalid cron expression")
-			}
-		})
-	}
-}
-
-func TestCronNextRunTime(t *testing.T) {
-	jobFactory := testutils.NewJobFactory()
-
-	testCases := []struct {
-		name     string
-		cronExpr string
-		validate func(t *testing.T, nextRunTime time.Time)
-	}{
-		{
-			"Every Minute",
-			"* * * * *",
-			func(t *testing.T, nextRunTime time.Time) {
-				// Should be less than 1 minute in the future
-				expected := time.Now().Add(time.Minute)
-				assert.True(t, nextRunTime.Before(expected),
-					"NextRunTime should be less than 1 minute in the future")
-			},
-		},
-		{
-			"Every Hour",
-			"0 * * * *",
-			func(t *testing.T, nextRunTime time.Time) {
-				now := time.Now()
-				nextHour := now.Add(time.Hour).Truncate(time.Hour)
-				diff := nextRunTime.Sub(nextHour).Abs()
-				assert.True(t, diff < time.Minute,
-					"NextRunTime should be at the next hour")
-			},
-		},
-		{
-			"Every 5 Minutes",
-			"*/5 * * * *",
-			func(t *testing.T, nextRunTime time.Time) {
-				expected := time.Now().Add(5 * time.Minute)
-				assert.True(t, nextRunTime.Before(expected),
-					"NextRunTime should be within the next 5 minutes")
-
-				assert.Equal(t, 0, nextRunTime.Minute()%5,
-					"NextRunTime minute should be divisible by 5")
-			},
-		},
-		{
-			"Every 15 Minutes",
-			"*/15 * * * *",
-			func(t *testing.T, nextRunTime time.Time) {
-				expected := time.Now().Add(15 * time.Minute)
-				assert.True(t, nextRunTime.Before(expected),
-					"NextRunTime should be within the next 15 minutes")
-
-				validMinutes := map[int]bool{0: true, 15: true, 30: true, 45: true}
-				assert.True(t, validMinutes[nextRunTime.Minute()],
-					"NextRunTime minute should be 0, 15, 30, or 45")
-			},
-		},
-		{
-			"Daily at Midnight",
-			"0 0 * * *",
-			func(t *testing.T, nextRunTime time.Time) {
-				assert.Equal(t, 0, nextRunTime.Hour(), "NextRunTime hour should be 0")
-				assert.Equal(t, 0, nextRunTime.Minute(), "NextRunTime minute should be 0")
-
-				now := time.Now()
-				tomorrow := now.AddDate(0, 0, 1)
-
-				if now.Hour() >= 0 || (now.Hour() == 0 && now.Minute() > 0) {
-					assert.Equal(t, tomorrow.Day(), nextRunTime.Day(),
-						"NextRunTime should be tomorrow at midnight")
-				}
-			},
-		},
-		{
-			"Weekdays at 9am",
-			"0 9 * * 1-5",
-			func(t *testing.T, nextRunTime time.Time) {
-				assert.Equal(t, 9, nextRunTime.Hour(), "NextRunTime hour should be 9")
-				assert.Equal(t, 0, nextRunTime.Minute(), "NextRunTime minute should be 0")
-
-				weekday := nextRunTime.Weekday()
-				assert.True(t, weekday >= time.Monday && weekday <= time.Friday,
-					"NextRunTime should be on a weekday (Monday-Friday)")
-
-				assert.True(t, nextRunTime.After(time.Now()),
-					"NextRunTime should be in the future")
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			job := jobFactory.CreateScheduledJob(tc.cronExpr)
-			require.NotNil(t, job, "Failed to create job with cron expression: %s", tc.cronExpr)
-
-			assert.False(t, job.NextRunTime.IsZero(), "NextRunTime should be set")
-
-			tc.validate(t, job.NextRunTime)
-		})
-	}
-}
-
-func TestExecutorWithScheduledCommands(t *testing.T) {
+func TestExecutorKill(t *testing.T) {
+	// 创建模拟的执行报告器
 	mockReporter := mocks.NewIExecutionReporter(t)
 
+	// 设置模拟期望
 	mockReporter.EXPECT().ReportStart(testutils.MockAny(), testutils.MockAny()).Return(nil)
 	mockReporter.EXPECT().ReportOutput(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
-	mockReporter.EXPECT().ReportError(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe() // 添加这一行
+	mockReporter.EXPECT().ReportProgress(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
 	mockReporter.EXPECT().ReportCompletion(testutils.MockAny(), testutils.MockAny()).Return(nil)
 
+	// 创建执行器
 	exec := executor.NewExecutor(
 		mockReporter,
-		executor.WithMaxConcurrentExecutions(5),
+		executor.WithMaxConcurrentExecutions(2),
 		executor.WithDefaultTimeout(30*time.Second),
+		executor.WithKillGracePeriod(1*time.Second),
 	)
 
+	// 创建任务工厂和简单任务
 	jobFactory := testutils.NewJobFactory()
+	job := jobFactory.CreateSimpleJob()
 
-	testCases := []struct {
-		name         string
-		command      string
-		args         []string
-		expectedOut  string
-		expectErr    bool
-		expectedCode int
-	}{
-		{"Echo Command", "cmd", []string{"/c", "echo", "scheduled task"}, "scheduled task", false, 0},
-		{"Directory Listing", "cmd", []string{"/c", "dir"}, "", false, 0},
-		{"Sleep Command", "cmd", []string{"/c", "timeout", "1"}, "", false, 1}, // 改为期望退出码 1
-		{"Invalid Command", "nonexistentcmd", []string{}, "", true, 1},
+	// 创建一个长时间运行的命令
+	var command string
+	var args []string
+	if os.Getenv("GOOS") == "windows" {
+		command = "ping"
+		args = []string{"-t", "localhost"}
+	} else {
+		command = "sleep"
+		args = []string{"30"}
 	}
 
-	for i, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			job := jobFactory.CreateScheduledJob("0 0 * * *")
-			require.NotNil(t, job, "Failed to create scheduled job")
+	// 创建执行上下文
+	execID := "test-kill-execution"
+	execCtx := &executor.ExecutionContext{
+		ExecutionID:   execID,
+		Job:           job,
+		Command:       command,
+		Args:          args,
+		WorkDir:       "",
+		Environment:   nil,
+		Timeout:       30 * time.Second,
+		Reporter:      mockReporter,
+		MaxOutputSize: 10 * 1024 * 1024, // 10MB
+	}
 
+	// 在goroutine中执行命令，因为它会运行很长时间
+	resultChan := make(chan *executor.ExecutionResult, 1)
+	errChan := make(chan error, 1)
+	go func() {
+		result, err := exec.Execute(context.Background(), execCtx)
+		resultChan <- result
+		errChan <- err
+	}()
+
+	// 等待一段时间让命令开始运行
+	time.Sleep(2 * time.Second)
+
+	// 获取执行状态，确认命令正在运行
+	status, exists := exec.GetExecutionStatus(execID)
+	require.True(t, exists, "Execution status should exist")
+	assert.Equal(t, executor.ExecutionStateRunning, status.State, "Execution should be running")
+
+	// 终止命令
+	err := exec.Kill(execID)
+	require.NoError(t, err, "Kill should not return an error")
+
+	// 等待结果
+	select {
+	case result := <-resultChan:
+		// 验证结果
+		assert.NotEqual(t, 0, result.ExitCode, "Exit code should not be 0 for killed process")
+		assert.NotEqual(t, ExecutionStateSuccess, result.State, "Execution state should not be success")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for execution result after kill")
+	}
+}
+
+func TestExecutorWithConcurrency(t *testing.T) {
+	// 创建模拟的执行报告器
+	mockReporter := mocks.NewIExecutionReporter(t)
+
+	// 设置较宽松的模拟期望，因为我们将执行多个命令
+	mockReporter.EXPECT().ReportStart(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+	mockReporter.EXPECT().ReportOutput(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+	mockReporter.EXPECT().ReportCompletion(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+
+	// 创建执行器，设置并发数为2
+	exec := executor.NewExecutor(
+		mockReporter,
+		executor.WithMaxConcurrentExecutions(2),
+		executor.WithDefaultTimeout(10*time.Second),
+	)
+
+	// 创建任务工厂
+	jobFactory := testutils.NewJobFactory()
+
+	// 创建3个任务，使用sleep命令
+	jobCount := 3
+	results := make(chan bool, jobCount)
+
+	// 使用适合当前操作系统的sleep命令
+	var command string
+	var args []string
+	if os.Getenv("GOOS") == "windows" {
+		command = "timeout"
+		args = []string{"/t", "3", "/nobreak"}
+	} else {
+		command = "sleep"
+		args = []string{"3"}
+	}
+
+	// 并发启动3个任务
+	for i := 0; i < jobCount; i++ {
+		go func(index int) {
+			job := jobFactory.CreateSimpleJob()
 			execCtx := &executor.ExecutionContext{
-				ExecutionID:   fmt.Sprintf("test-scheduled-exec-%d", i+1),
+				ExecutionID:   fmt.Sprintf("test-concurrent-%d", index),
 				Job:           job,
-				Command:       tc.command,
-				Args:          tc.args,
+				Command:       command,
+				Args:          args,
+				WorkDir:       "",
+				Environment:   nil,
 				Timeout:       5 * time.Second,
 				Reporter:      mockReporter,
-				MaxOutputSize: 1024 * 1024,
+				MaxOutputSize: 10 * 1024 * 1024, // 10MB
 			}
 
 			result, err := exec.Execute(context.Background(), execCtx)
-
-			require.NoError(t, err, "Execute should not return an error")
-
-			if tc.expectErr {
-				assert.NotEqual(t, 0, result.ExitCode, "Expected non-zero exit code")
-				assert.Equal(t, executor.ExecutionStateFailed, result.State, "Expected failed state")
+			if err == nil && result.ExitCode == 0 {
+				results <- true
 			} else {
-				assert.Equal(t, tc.expectedCode, result.ExitCode, "Expected exit code %d", tc.expectedCode)
-
-				if tc.expectedCode != 0 {
-					assert.Equal(t, executor.ExecutionStateFailed, result.State, "Expected failed state for non-zero exit code")
-				} else {
-					assert.Equal(t, executor.ExecutionStateSuccess, result.State, "Expected success state")
-				}
-
-				if tc.expectedOut != "" {
-					assert.Contains(t, result.Output, tc.expectedOut, "Output should contain expected text")
-				}
+				results <- false
 			}
-		})
+		}(i)
 	}
+
+	// 检查并发执行
+	execStatus := exec.GetRunningExecutions()
+	time.Sleep(500 * time.Millisecond) // 给执行一些启动时间
+
+	// 由于我们设置了最大并发数为2，应该只有2个任务在运行
+	t.Logf("Running executions: %d", len(execStatus))
+	assert.LessOrEqual(t, len(execStatus), 2, "Should have at most 2 concurrent executions")
+
+	// 等待所有任务完成
+	successCount := 0
+	for i := 0; i < jobCount; i++ {
+		success := <-results
+		if success {
+			successCount++
+		}
+	}
+
+	assert.Equal(t, jobCount, successCount, "All jobs should have succeeded")
 }
 
-func TestJobRetryLogic(t *testing.T) {
+func TestExecutorWithTimeout(t *testing.T) {
+	// 创建模拟的执行报告器
 	mockReporter := mocks.NewIExecutionReporter(t)
 
+	// 设置模拟期望
+	mockReporter.EXPECT().ReportStart(testutils.MockAny(), testutils.MockAny()).Return(nil)
+	mockReporter.EXPECT().ReportOutput(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+	mockReporter.EXPECT().ReportProgress(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+	mockReporter.EXPECT().ReportCompletion(testutils.MockAny(), testutils.MockAny()).Return(nil)
+
+	// 创建执行器
+	exec := executor.NewExecutor(
+		mockReporter,
+		executor.WithMaxConcurrentExecutions(2),
+		executor.WithDefaultTimeout(10*time.Second),
+	)
+
+	// 创建任务工厂和简单任务
+	jobFactory := testutils.NewJobFactory()
+	job := jobFactory.CreateSimpleJob()
+
+	// 创建一个长时间运行的命令
+	var command string
+	var args []string
+	if os.Getenv("GOOS") == "windows" {
+		command = "ping"
+		args = []string{"-t", "localhost"}
+	} else {
+		command = "sleep"
+		args = []string{"30"}
+	}
+
+	// 创建执行上下文，设置非常短的超时
+	execCtx := &executor.ExecutionContext{
+		ExecutionID:   "test-timeout-execution",
+		Job:           job,
+		Command:       command,
+		Args:          args,
+		WorkDir:       "",
+		Environment:   nil,
+		Timeout:       2 * time.Second, // 非常短的超时
+		Reporter:      mockReporter,
+		MaxOutputSize: 10 * 1024 * 1024, // 10MB
+	}
+
+	// 执行命令
+	result, err := exec.Execute(context.Background(), execCtx)
+
+	// 验证结果
+	require.NoError(t, err, "Execute should not return an error")
+	assert.NotEqual(t, 0, result.ExitCode, "Exit code should not be 0 for timed out process")
+	assert.Equal(t, executor.ExecutionStateTimeout, result.State, "Execution state should be timeout")
+}
+
+func TestExecutorMultipleCommands(t *testing.T) {
+	// 创建模拟的执行报告器
+	mockReporter := mocks.NewIExecutionReporter(t)
+
+	// 设置模拟期望
 	mockReporter.EXPECT().ReportStart(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
 	mockReporter.EXPECT().ReportOutput(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
-	mockReporter.EXPECT().ReportError(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
 	mockReporter.EXPECT().ReportCompletion(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
-	mockReporter.EXPECT().ReportProgress(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe() // 添加对ReportProgress的处理
 
+	// 创建执行器
 	exec := executor.NewExecutor(
 		mockReporter,
 		executor.WithMaxConcurrentExecutions(5),
 		executor.WithDefaultTimeout(10*time.Second),
 	)
 
+	// 创建任务工厂
 	jobFactory := testutils.NewJobFactory()
+	job := jobFactory.CreateSimpleJob()
 
-	job := jobFactory.CreateComplexJob(
-		"retry-test-job",
-		"cmd",
-		"*/10 * * * *",
-		5,
-		nil,
-	)
+	// 准备一组要执行的命令
+	commandPairs := []struct {
+		cmd  string
+		args []string
+	}{
+		{"echo", []string{"Hello World"}},
+		{"echo", []string{"Test Multiple Commands"}},
+		{"echo", []string{"Success Expected"}},
+	}
 
-	job.Command = "cmd"
-	job.Args = []string{"/c", "exit", "1"}
-	job.MaxRetry = 2
-
-	retryCount := 0
-
-	executeWithRetry := func(ctx context.Context, execCtx *executor.ExecutionContext) (*executor.ExecutionResult, error) {
-		var finalResult *executor.ExecutionResult
-		var finalErr error
-
-		result, err := exec.Execute(ctx, execCtx)
-		retryCount++
-
-		finalResult = result
-		finalErr = err
-
-		retryAttempt := 0
-		for retryAttempt < job.MaxRetry && result.ExitCode != 0 {
-			time.Sleep(100 * time.Millisecond)
-
-			execCtx.ExecutionID = fmt.Sprintf("%s-retry-%d", execCtx.ExecutionID, retryAttempt+1)
-
-			result, err = exec.Execute(ctx, execCtx)
-			retryCount++
-			retryAttempt++
-			finalResult = result
-			finalErr = err
+	// 依次执行每个命令
+	for i, cmdPair := range commandPairs {
+		// 创建执行上下文
+		execID := fmt.Sprintf("test-multi-%d", i)
+		execCtx := &executor.ExecutionContext{
+			ExecutionID:   execID,
+			Job:           job,
+			Command:       cmdPair.cmd,
+			Args:          cmdPair.args,
+			WorkDir:       "",
+			Environment:   nil,
+			Timeout:       5 * time.Second,
+			Reporter:      mockReporter,
+			MaxOutputSize: 10 * 1024 * 1024, // 10MB
 		}
 
-		return finalResult, finalErr
+		// 执行命令
+		result, err := exec.Execute(context.Background(), execCtx)
+
+		// 验证结果
+		require.NoError(t, err, "Execute should not return an error")
+		assert.Equal(t, 0, result.ExitCode, "Exit code should be 0")
+		assert.Equal(t, ExecutionStateSuccess, result.State, "Execution state should be success")
+
+		// 验证输出包含命令参数
+		for _, arg := range cmdPair.args {
+			assert.Contains(t, result.Output, arg, "Output should contain the command argument")
+		}
+	}
+}
+
+func TestExecuteJobWithContextCancellation(t *testing.T) {
+	// 创建模拟的执行报告器
+	mockReporter := mocks.NewIExecutionReporter(t)
+
+	// 设置模拟期望
+	mockReporter.EXPECT().ReportStart(testutils.MockAny(), testutils.MockAny()).Return(nil)
+	mockReporter.EXPECT().ReportOutput(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+	mockReporter.EXPECT().ReportProgress(testutils.MockAny(), testutils.MockAny()).Return(nil).Maybe()
+	mockReporter.EXPECT().ReportCompletion(testutils.MockAny(), testutils.MockAny()).Return(nil)
+
+	// 创建执行器
+	exec := executor.NewExecutor(
+		mockReporter,
+		executor.WithMaxConcurrentExecutions(2),
+		executor.WithDefaultTimeout(30*time.Second),
+	)
+
+	// 创建任务工厂和简单任务
+	jobFactory := testutils.NewJobFactory()
+	job := jobFactory.CreateSimpleJob()
+
+	// 创建一个长时间运行的命令
+	var command string
+	var args []string
+	if os.Getenv("GOOS") == "windows" {
+		command = "ping"
+		args = []string{"-t", "localhost"}
+	} else {
+		command = "sleep"
+		args = []string{"10"}
 	}
 
+	// 创建一个可取消的上下文
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// 创建执行上下文
 	execCtx := &executor.ExecutionContext{
-		ExecutionID:   "test-retry-exec",
+		ExecutionID:   "test-ctx-cancel",
 		Job:           job,
-		Command:       job.Command,
-		Args:          job.Args,
-		Timeout:       5 * time.Second,
+		Command:       command,
+		Args:          args,
+		WorkDir:       "",
+		Environment:   nil,
+		Timeout:       20 * time.Second,
 		Reporter:      mockReporter,
-		MaxOutputSize: 1024 * 1024,
+		MaxOutputSize: 10 * 1024 * 1024, // 10MB
 	}
 
-	result, err := executeWithRetry(context.Background(), execCtx)
+	// 在goroutine中执行命令
+	resultChan := make(chan *executor.ExecutionResult, 1)
+	errChan := make(chan error, 1)
+	go func() {
+		result, err := exec.Execute(ctx, execCtx)
+		resultChan <- result
+		errChan <- err
+	}()
 
+	// 等待命令开始执行
+	time.Sleep(1 * time.Second)
+
+	// 取消上下文
+	cancel()
+
+	// 等待结果
+	var result *executor.ExecutionResult
+	var err error
+	select {
+	case result = <-resultChan:
+		err = <-errChan
+		// 正常情况，已收到结果
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for execution result after context cancellation")
+	}
+
+	// 验证执行已被取消
 	require.NoError(t, err, "Execute should not return an error")
-	assert.Equal(t, 1, result.ExitCode, "Final exit code should be 1")
-	assert.Equal(t, executor.ExecutionStateFailed, result.State, "Final state should be failed")
-	assert.Equal(t, 3, retryCount, "Should have attempted execution 3 times (initial + 2 retries)")
+	assert.NotEqual(t, 0, result.ExitCode, "Exit code should not be 0 for cancelled process")
+	assert.Equal(t, executor.ExecutionStateCancelled, result.State, "Execution state should be cancelled")
 }

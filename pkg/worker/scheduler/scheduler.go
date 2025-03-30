@@ -812,3 +812,14 @@ func (s *Scheduler) handleJobKillEvent(job *models.Job) {
 		s.updateStatus()
 	}
 }
+
+func (s *Scheduler) Contains(id string) bool {
+	jobs := s.jobQueue.GetAll()
+	for _, job := range jobs {
+		if job.Job.ID == id {
+			return true
+		}
+	}
+
+	return false
+}

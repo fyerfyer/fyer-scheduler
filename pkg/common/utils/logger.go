@@ -94,6 +94,18 @@ func InitLogger(cfg *config.LogConfig) {
 	})
 }
 
+// SetLogLevel 设置日志级别
+func SetLogLevel(level string) {
+	// 使用默认配置，只修改级别
+	cfg := &config.LogConfig{
+		Level:      level,
+		MaxSize:    100,
+		MaxBackups: 3,
+		MaxAge:     7,
+	}
+	InitLogger(cfg)
+}
+
 // GetLogger 返回已初始化的logger实例
 func GetLogger() *zap.Logger {
 	// 确保logger已经初始化

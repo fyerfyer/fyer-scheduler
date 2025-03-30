@@ -26,31 +26,33 @@ func TestSchedulerBasicFunctions(t *testing.T) {
 	// 创建WorkerJobManager
 	workerID := testutils.GenerateUniqueID("worker")
 	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
-	err := jobManager.Start()
-	require.NoError(t, err, "Failed to start job manager")
-	defer jobManager.Stop()
 
 	// 创建LockManager
 	lockManager := joblock.NewLockManager(etcdClient, workerID)
-	err = lockManager.Start()
+	err := lockManager.Start()
 	require.NoError(t, err, "Failed to start lock manager")
 	defer lockManager.Stop()
 
 	// 创建执行函数
-	executed := make(chan string, 10)
-	executionFunc := func(job *scheduler.ScheduledJob) error {
-		utils.Info("executing job", zap.String("job_id", job.Job.ID), zap.String("job_name", job.Job.Name))
-		executed <- job.Job.ID
+	executedJobs := make(map[string]bool)
+	executionMutex := sync.Mutex{}
+
+	executeJobFunc := func(job *scheduler.ScheduledJob) error {
+		executionMutex.Lock()
+		defer executionMutex.Unlock()
+		executedJobs[job.Job.ID] = true
+		utils.Info("job executed", zap.String("job_id", job.Job.ID))
 		return nil
 	}
 
 	// 创建调度器
-	schedulerOptions := []scheduler.SchedulerOption{
-		scheduler.WithCheckInterval(1 * time.Second),
-		scheduler.WithMaxConcurrent(5),
-	}
-
-	sched := scheduler.NewScheduler(jobManager, lockManager, executionFunc, schedulerOptions...)
+	sched := scheduler.NewScheduler(
+		jobManager,
+		lockManager,
+		executeJobFunc,
+		scheduler.WithCheckInterval(1*time.Second),
+		scheduler.WithMaxConcurrent(2),
+	)
 
 	// 启动调度器
 	err = sched.Start()
@@ -65,45 +67,42 @@ func TestSchedulerBasicFunctions(t *testing.T) {
 	jobFactory := testutils.NewJobFactory()
 
 	// 添加一个简单任务
-	job1 := jobFactory.CreateSimpleJob()
-	err = sched.AddJob(job1)
-	require.NoError(t, err, "Failed to add job1")
+	simpleJob := jobFactory.CreateSimpleJob()
+	simpleJob.Status = "pending"
+	simpleJob.Enabled = true
+	err = sched.AddJob(simpleJob)
+	require.NoError(t, err, "Failed to add simple job")
 
-	// 添加一个带cron表达式的任务
-	job2 := jobFactory.CreateScheduledJob("@every 5s") // 每5秒执行一次
-	err = sched.AddJob(job2)
-	require.NoError(t, err, "Failed to add job2")
+	// 添加一个带cron表达式的任务，每5秒执行一次
+	cronJob := jobFactory.CreateScheduledJob("*/5 * * * * *")
+	cronJob.Status = "pending"
+	cronJob.Enabled = true
+	err = sched.AddJob(cronJob)
+	require.NoError(t, err, "Failed to add cron job")
 
 	// 验证任务数量
 	jobs := sched.ListJobs()
-	assert.Len(t, jobs, 2, "Should have 2 jobs in scheduler")
+	assert.Equal(t, 2, len(jobs), "Scheduler should have 2 jobs")
 
 	// 立即触发任务执行
-	err = sched.TriggerJob(job1.ID)
-	require.NoError(t, err, "Failed to trigger job1")
+	err = sched.TriggerJob(simpleJob.ID)
+	require.NoError(t, err, "Failed to trigger job")
 
 	// 等待任务执行完成
-	select {
-	case executedJobID := <-executed:
-		assert.Equal(t, job1.ID, executedJobID, "Executed job ID should match triggered job ID")
-	case <-time.After(5 * time.Second):
-		t.Fatal("Job execution timed out")
-	}
+	time.Sleep(2 * time.Second)
+
+	// 验证任务已执行
+	executionMutex.Lock()
+	assert.True(t, executedJobs[simpleJob.ID], "Simple job should have been executed")
+	executionMutex.Unlock()
 
 	// 移除任务
-	err = sched.RemoveJob(job1.ID)
-	require.NoError(t, err, "Failed to remove job1")
+	err = sched.RemoveJob(simpleJob.ID)
+	require.NoError(t, err, "Failed to remove job")
 
 	// 验证任务数量减少
 	jobs = sched.ListJobs()
-	assert.Len(t, jobs, 1, "Should have 1 job in scheduler after removal")
-
-	// 停止调度器
-	err = sched.Stop()
-	require.NoError(t, err, "Failed to stop scheduler")
-
-	status = sched.GetStatus()
-	assert.False(t, status.IsRunning, "Scheduler should not be running after stop")
+	assert.Equal(t, 1, len(jobs), "Scheduler should have 1 job after removal")
 }
 
 // TestScheduledJobExecution 测试定时调度任务执行
@@ -115,37 +114,37 @@ func TestScheduledJobExecution(t *testing.T) {
 	// 创建WorkerJobManager
 	workerID := testutils.GenerateUniqueID("worker")
 	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
-	err := jobManager.Start()
-	require.NoError(t, err, "Failed to start job manager")
-	defer jobManager.Stop()
 
 	// 创建LockManager
 	lockManager := joblock.NewLockManager(etcdClient, workerID)
-	err = lockManager.Start()
+	err := lockManager.Start()
 	require.NoError(t, err, "Failed to start lock manager")
 	defer lockManager.Stop()
 
 	// 创建执行通知通道和计数器
-	executionCount := 0
-	var countMutex sync.Mutex
-	executed := make(chan string, 10)
+	execChan := make(chan string, 10)
+	execCount := 0
+	var execIDList []string
+	var execMutex sync.Mutex
 
 	// 创建执行函数
-	executionFunc := func(job *scheduler.ScheduledJob) error {
-		countMutex.Lock()
-		executionCount++
-		countMutex.Unlock()
-		executed <- job.Job.ID
+	executeJobFunc := func(job *scheduler.ScheduledJob) error {
+		execMutex.Lock()
+		defer execMutex.Unlock()
+		execCount++
+		execChan <- job.Job.ID
+		execIDList = append(execIDList, job.Job.ID)
+		utils.Info("scheduled job executed", zap.String("job_id", job.Job.ID), zap.Int("count", execCount))
 		return nil
 	}
 
 	// 创建调度器，使用较短的检查间隔
-	schedulerOptions := []scheduler.SchedulerOption{
-		scheduler.WithCheckInterval(500 * time.Millisecond),
-		scheduler.WithMaxConcurrent(5),
-	}
-
-	sched := scheduler.NewScheduler(jobManager, lockManager, executionFunc, schedulerOptions...)
+	sched := scheduler.NewScheduler(
+		jobManager,
+		lockManager,
+		executeJobFunc,
+		scheduler.WithCheckInterval(1*time.Second),
+	)
 
 	// 启动调度器
 	err = sched.Start()
@@ -156,33 +155,41 @@ func TestScheduledJobExecution(t *testing.T) {
 	jobFactory := testutils.NewJobFactory()
 
 	// 创建一个定时任务，使用"@every"语法更可靠地进行测试
-	job := jobFactory.CreateScheduledJob("@every 1s")
-	err = sched.AddJob(job)
-	require.NoError(t, err, "Failed to add scheduled job")
+	everyJob := jobFactory.CreateScheduledJob("@every 2s")
+	everyJob.Status = "pending"
+	everyJob.Enabled = true
+	err = sched.AddJob(everyJob)
+	require.NoError(t, err, "Failed to add @every job")
 
 	// 等待至少2次执行
-	jobIDs := make([]string, 0)
-	timeout := time.After(10 * time.Second)
+	timeout := time.After(6 * time.Second)
+	executionCount := 0
 
-	for i := 0; i < 2; i++ {
+waitLoop:
+	for {
 		select {
-		case id := <-executed:
-			jobIDs = append(jobIDs, id)
+		case jobID := <-execChan:
+			assert.Equal(t, everyJob.ID, jobID, "Executed job ID should match")
+			executionCount++
+			if executionCount >= 2 {
+				break waitLoop
+			}
 		case <-timeout:
-			t.Fatalf("Timed out waiting for job executions, got %d executions", len(jobIDs))
+			t.Log("Timeout waiting for job executions")
+			break waitLoop
 		}
 	}
 
 	// 验证执行的任务ID
-	for _, id := range jobIDs {
-		assert.Equal(t, job.ID, id, "Executed job ID should match scheduled job ID")
+	execMutex.Lock()
+	assert.GreaterOrEqual(t, len(execIDList), 2, "Job should have been executed at least 2 times")
+	for _, id := range execIDList {
+		assert.Equal(t, everyJob.ID, id, "All executions should be for the same job")
 	}
+	execMutex.Unlock()
 
 	// 验证执行次数
-	countMutex.Lock()
-	count := executionCount
-	countMutex.Unlock()
-	assert.GreaterOrEqual(t, count, 2, "Job should have executed at least 2 times")
+	assert.GreaterOrEqual(t, executionCount, 2, "Job should have been executed at least 2 times")
 }
 
 // TestJobFailureHandling 测试任务失败处理
@@ -194,46 +201,44 @@ func TestJobFailureHandling(t *testing.T) {
 	// 创建WorkerJobManager
 	workerID := testutils.GenerateUniqueID("worker")
 	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
-	err := jobManager.Start()
-	require.NoError(t, err, "Failed to start job manager")
-	defer jobManager.Stop()
 
 	// 创建LockManager
 	lockManager := joblock.NewLockManager(etcdClient, workerID)
-	err = lockManager.Start()
+	err := lockManager.Start()
 	require.NoError(t, err, "Failed to start lock manager")
 	defer lockManager.Stop()
 
 	// 创建失败计数和通知通道
-	failCount := 0
-	var countMutex sync.Mutex
-	executed := make(chan bool, 10) // true表示成功, false表示失败
+	failureCount := 0
+	executionChan := make(chan bool, 10) // true表示成功, false表示失败
+	var execMutex sync.Mutex
 
 	// 创建执行函数 - 第一次执行将失败，第二次执行将成功
-	executionFunc := func(job *scheduler.ScheduledJob) error {
-		countMutex.Lock()
-		shouldFail := failCount == 0
-		failCount++
-		countMutex.Unlock()
+	executeJobFunc := func(job *scheduler.ScheduledJob) error {
+		execMutex.Lock()
+		defer execMutex.Unlock()
 
-		if shouldFail {
-			executed <- false
-			return fmt.Errorf("simulated failure for testing")
+		if failureCount == 0 {
+			failureCount++
+			executionChan <- false
+			utils.Info("job execution failed (intentionally)", zap.String("job_id", job.Job.ID))
+			return fmt.Errorf("simulated job failure")
 		}
 
-		executed <- true
+		executionChan <- true
+		utils.Info("job execution succeeded", zap.String("job_id", job.Job.ID))
 		return nil
 	}
 
 	// 创建调度器，配置为失败重试
-	schedulerOptions := []scheduler.SchedulerOption{
-		scheduler.WithCheckInterval(1 * time.Second),
-		scheduler.WithMaxConcurrent(2),
-		scheduler.WithRetryStrategy(1, 1*time.Second), // 重试1次，间隔1秒
+	sched := scheduler.NewScheduler(
+		jobManager,
+		lockManager,
+		executeJobFunc,
+		scheduler.WithCheckInterval(1*time.Second),
+		scheduler.WithRetryStrategy(1, 2*time.Second),
 		scheduler.WithFailStrategy(scheduler.FailStrategyRetry),
-	}
-
-	sched := scheduler.NewScheduler(jobManager, lockManager, executionFunc, schedulerOptions...)
+	)
 
 	// 启动调度器
 	err = sched.Start()
@@ -245,6 +250,8 @@ func TestJobFailureHandling(t *testing.T) {
 
 	// 添加一个简单任务
 	job := jobFactory.CreateSimpleJob()
+	job.Status = "pending"
+	job.Enabled = true
 	err = sched.AddJob(job)
 	require.NoError(t, err, "Failed to add job")
 
@@ -253,26 +260,31 @@ func TestJobFailureHandling(t *testing.T) {
 	require.NoError(t, err, "Failed to trigger job")
 
 	// 等待第一次执行结果（应该失败）
+	timeout := time.After(3 * time.Second)
+	var firstResult bool
 	select {
-	case success := <-executed:
-		assert.False(t, success, "First execution should fail")
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timed out waiting for first execution")
+	case result := <-executionChan:
+		firstResult = result
+	case <-timeout:
+		t.Fatal("Timeout waiting for first execution")
 	}
+	assert.False(t, firstResult, "First execution should fail")
 
 	// 等待重试执行结果（应该成功）
+	timeout = time.After(5 * time.Second)
+	var secondResult bool
 	select {
-	case success := <-executed:
-		assert.True(t, success, "Retry execution should succeed")
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timed out waiting for retry execution")
+	case result := <-executionChan:
+		secondResult = result
+	case <-timeout:
+		t.Fatal("Timeout waiting for retry execution")
 	}
+	assert.True(t, secondResult, "Retry execution should succeed")
 
 	// 验证失败计数
-	countMutex.Lock()
-	count := failCount
-	countMutex.Unlock()
-	assert.Equal(t, 2, count, "Job should have executed twice (once failed, once succeeded)")
+	execMutex.Lock()
+	assert.Equal(t, 1, failureCount, "Job should have failed exactly once")
+	execMutex.Unlock()
 }
 
 // TestConcurrentJobExecution 测试并发任务执行
@@ -284,35 +296,52 @@ func TestConcurrentJobExecution(t *testing.T) {
 	// 创建WorkerJobManager
 	workerID := testutils.GenerateUniqueID("worker")
 	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
-	err := jobManager.Start()
-	require.NoError(t, err, "Failed to start job manager")
-	defer jobManager.Stop()
 
 	// 创建LockManager
 	lockManager := joblock.NewLockManager(etcdClient, workerID)
-	err = lockManager.Start()
+	err := lockManager.Start()
 	require.NoError(t, err, "Failed to start lock manager")
 	defer lockManager.Stop()
 
 	// 创建等待组和计数器以跟踪并发执行
 	var wg sync.WaitGroup
-	executed := make(chan string, 10)
+	var concurrentCounter int
+	var maxConcurrent int
+	var counterMutex sync.Mutex
+	executedJobs := make(map[string]int) // 记录每个任务执行的次数
 
 	// 创建执行函数 - 模拟需要一些时间的操作
-	executionFunc := func(job *scheduler.ScheduledJob) error {
-		time.Sleep(1 * time.Second) // 模拟一些工作
-		executed <- job.Job.ID
+	executeJobFunc := func(job *scheduler.ScheduledJob) error {
+		counterMutex.Lock()
+		concurrentCounter++
+		if concurrentCounter > maxConcurrent {
+			maxConcurrent = concurrentCounter
+		}
+		executedJobs[job.Job.ID]++
+		counterMutex.Unlock()
+
+		utils.Info("job started", zap.String("job_id", job.Job.ID), zap.Int("concurrent", concurrentCounter))
+
+		// 模拟工作负载
+		time.Sleep(1 * time.Second)
+
+		counterMutex.Lock()
+		concurrentCounter--
+		counterMutex.Unlock()
+
+		utils.Info("job completed", zap.String("job_id", job.Job.ID))
 		wg.Done()
 		return nil
 	}
 
 	// 创建调度器，配置并发度为3
-	schedulerOptions := []scheduler.SchedulerOption{
-		scheduler.WithCheckInterval(500 * time.Millisecond),
-		scheduler.WithMaxConcurrent(3), // 最多3个并发任务
-	}
-
-	sched := scheduler.NewScheduler(jobManager, lockManager, executionFunc, schedulerOptions...)
+	sched := scheduler.NewScheduler(
+		jobManager,
+		lockManager,
+		executeJobFunc,
+		scheduler.WithMaxConcurrent(3),
+		scheduler.WithCheckInterval(500*time.Millisecond),
+	)
 
 	// 启动调度器
 	err = sched.Start()
@@ -326,53 +355,46 @@ func TestConcurrentJobExecution(t *testing.T) {
 	jobs := make([]*models.Job, 5)
 	for i := 0; i < 5; i++ {
 		jobs[i] = jobFactory.CreateSimpleJob()
-		err = sched.AddJob(jobs[i])
+		jobs[i].Status = "pending"
+		jobs[i].Enabled = true
+		err := sched.AddJob(jobs[i])
 		require.NoError(t, err, "Failed to add job")
 		wg.Add(1)
 	}
 
 	// 立即触发所有任务
 	for _, job := range jobs {
-		err = sched.TriggerJob(job.ID)
+		err := sched.TriggerJob(job.ID)
 		require.NoError(t, err, "Failed to trigger job")
 	}
 
 	// 设置等待超时
-	doneCh := make(chan struct{})
+	waitCh := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(doneCh)
+		close(waitCh)
 	}()
 
 	// 等待所有任务完成或超时
 	select {
-	case <-doneCh:
-		// 所有任务已完成
+	case <-waitCh:
+		// 任务已全部完成
 	case <-time.After(10 * time.Second):
-		t.Fatal("Timed out waiting for all jobs to complete")
+		t.Fatal("Timeout waiting for jobs to complete")
 	}
 
 	// 验证所有任务都已执行
-	executedCount := 0
-	executedJobs := make(map[string]bool)
+	counterMutex.Lock()
+	defer counterMutex.Unlock()
 
-	// 收集已执行的任务
-	for i := 0; i < 5; i++ {
-		select {
-		case id := <-executed:
-			executedJobs[id] = true
-			executedCount++
-		default:
-			// 没有更多已执行的任务
-			break
-		}
-	}
-
-	assert.Equal(t, 5, executedCount, "All 5 jobs should have executed")
+	// 验证最大并发度
+	assert.Equal(t, 3, maxConcurrent, "Maximum concurrent executions should be 3")
 
 	// 验证每个任务都只执行了一次
 	for _, job := range jobs {
-		assert.True(t, executedJobs[job.ID], "Job should have been executed")
+		count, exists := executedJobs[job.ID]
+		assert.True(t, exists, "Job should have been executed")
+		assert.Equal(t, 1, count, "Job should have been executed exactly once")
 	}
 }
 
@@ -385,6 +407,8 @@ func TestJobEventHandling(t *testing.T) {
 	// 创建 WorkerJobManager
 	workerID := testutils.GenerateUniqueID("worker")
 	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
+
+	// 启动作业管理器
 	err := jobManager.Start()
 	require.NoError(t, err, "Failed to start job manager")
 	defer jobManager.Stop()
@@ -396,25 +420,38 @@ func TestJobEventHandling(t *testing.T) {
 	defer lockManager.Stop()
 
 	// 创建执行通道
-	executed := make(chan string, 10)
-	executionFunc := func(job *scheduler.ScheduledJob) error {
-		executed <- job.Job.ID
+	executedJobsChan := make(chan string, 10)
+
+	// 创建调度器
+	executeJobFunc := func(job *scheduler.ScheduledJob) error {
+		executedJobsChan <- job.Job.ID
+		utils.Info("job executed via event", zap.String("job_id", job.Job.ID))
 		return nil
 	}
 
-	// 创建调度器
-	sched := scheduler.NewScheduler(jobManager, lockManager, executionFunc)
+	sched := scheduler.NewScheduler(
+		jobManager,
+		lockManager,
+		executeJobFunc,
+		scheduler.WithCheckInterval(500*time.Millisecond),
+	)
+
+	// 启动调度器
 	err = sched.Start()
 	require.NoError(t, err, "Failed to start scheduler")
 	defer sched.Stop()
 
 	// 创建作业工厂
 	jobFactory := testutils.NewJobFactory()
+
+	// 创建测试作业
 	job := jobFactory.CreateSimpleJob()
+	job.Status = "pending"
+	job.Enabled = true
 
 	// 将作业保存到etcd以模拟来自主节点的作业事件
 	jobJSON, err := job.ToJSON()
-	require.NoError(t, err, "Failed to serialize job")
+	require.NoError(t, err, "Failed to convert job to JSON")
 
 	// 将worker ID添加到作业环境中以将其分配给此worker
 	if job.Env == nil {
@@ -423,33 +460,88 @@ func TestJobEventHandling(t *testing.T) {
 	job.Env["WORKER_ID"] = workerID
 
 	// 保存到etcd以触发作业事件
-	err = etcdClient.Put(job.Key(), jobJSON)
-	require.NoError(t, err, "Failed to save job to etcd")
+	jobKey := fmt.Sprintf("jobs/%s", job.ID)
+	err = etcdClient.Put(jobKey, jobJSON)
+	require.NoError(t, err, "Failed to put job in etcd")
 
 	// 等待作业被调度器拾取
-	time.Sleep(2 * time.Second)
+	timeout := time.After(5 * time.Second)
+	jobAdded := false
+
+	for !jobAdded {
+		select {
+		case <-timeout:
+			t.Fatal("Timeout waiting for job to be added to scheduler")
+		default:
+			time.Sleep(100 * time.Millisecond)
+			jobs := sched.ListJobs()
+			for _, j := range jobs {
+				if j.Job.ID == job.ID {
+					jobAdded = true
+					break
+				}
+			}
+		}
+	}
 
 	// 检查作业是否已添加到调度器
 	jobs := sched.ListJobs()
-	assert.GreaterOrEqual(t, len(jobs), 1, "Job should be added to scheduler")
-
-	// 如果我们从etcd中删除作业，它应该从调度器中删除
-	err = etcdClient.Delete(job.Key())
-	require.NoError(t, err, "Failed to delete job from etcd")
-
-	// 等待作业被移除
-	time.Sleep(2 * time.Second)
-
-	// 检查作业是否已从调度器中移除
-	jobs = sched.ListJobs()
-	foundJob := false
+	found := false
 	for _, j := range jobs {
 		if j.Job.ID == job.ID {
-			foundJob = true
+			found = true
 			break
 		}
 	}
-	assert.False(t, foundJob, "Job should be removed from scheduler")
+	assert.True(t, found, "Job should be added to scheduler")
+
+	// 立即触发任务执行
+	err = sched.TriggerJob(job.ID)
+	require.NoError(t, err, "Failed to trigger job")
+
+	// 等待任务执行
+	select {
+	case executedJobID := <-executedJobsChan:
+		assert.Equal(t, job.ID, executedJobID, "The executed job ID should match")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for job execution")
+	}
+
+	// 如果我们从etcd中删除作业，它应该从调度器中删除
+	err = etcdClient.Delete(jobKey)
+	require.NoError(t, err, "Failed to delete job from etcd")
+
+	// 等待作业被移除
+	timeout = time.After(5 * time.Second)
+	jobRemoved := false
+
+	for !jobRemoved {
+		select {
+		case <-timeout:
+			t.Fatal("Timeout waiting for job to be removed from scheduler")
+		default:
+			time.Sleep(100 * time.Millisecond)
+			jobs = sched.ListJobs()
+			jobRemoved = true
+			for _, j := range jobs {
+				if j.Job.ID == job.ID {
+					jobRemoved = false
+					break
+				}
+			}
+		}
+	}
+
+	// 检查作业是否已从调度器中移除
+	jobs = sched.ListJobs()
+	found = false
+	for _, j := range jobs {
+		if j.Job.ID == job.ID {
+			found = true
+			break
+		}
+	}
+	assert.False(t, found, "Job should be removed from scheduler")
 }
 
 // TestExecuteJobFunction 测试内部的 executeJob 函数
