@@ -501,8 +501,7 @@ func TestReportJobStatus(t *testing.T) {
 
 func TestKillJob(t *testing.T) {
 	// 创建作业管理器
-	workerID := testutils.GenerateUniqueID("worker")
-	jobManager := createTestJobManager(t, workerID)
+	jobManager := createTestJobManager(t, "")
 	defer jobManager.Stop()
 
 	// 创建etcd客户端
@@ -514,35 +513,41 @@ func TestKillJob(t *testing.T) {
 	jobFactory := testutils.NewJobFactory()
 	job := jobFactory.CreateSimpleJob()
 
-	// 将worker ID添加到作业
+	// 将工作节点ID添加到作业环境变量中
 	if job.Env == nil {
 		job.Env = make(map[string]string)
 	}
-	job.Env["WORKER_ID"] = workerID
+	job.Env["WORKER_ID"] = jobManager.GetWorkerID()
 
-	// 保存作业到etcd
+	// 将作业保存到etcd
 	jobJSON, err := job.ToJSON()
 	require.NoError(t, err, "Failed to convert job to JSON")
-
 	err = etcdClient.Put(constants.JobPrefix+job.ID, jobJSON)
 	require.NoError(t, err, "Failed to put job in etcd")
 
 	// 等待作业被发现
 	time.Sleep(1 * time.Second)
 
-	// 首先报告作业为运行状态
+	// 首先将作业报告为运行中
 	err = jobManager.ReportJobStatus(job, constants.JobStatusRunning)
-	require.NoError(t, err, "Failed to report job status")
+	require.NoError(t, err, "Failed to report job as running")
 
 	// 发送终止信号
 	err = jobManager.KillJob(job.ID)
 	require.NoError(t, err, "Failed to kill job")
 
-	// 验证终止信号已发送到etcd
-	killKey := job.ID
-	killVal, err := etcdClient.Get(killKey)
+	// 等待终止信号被处理
+	time.Sleep(100 * time.Millisecond)
+
+	// 验证终止信号是否已发送到etcd - 检查带有 "/kill" 后缀的正确路径
+	killKey := constants.JobPrefix + job.ID + "/kill"
+	killValue, err := etcdClient.Get(killKey)
 	require.NoError(t, err, "Failed to get kill signal from etcd")
-	assert.NotEmpty(t, killVal, "Kill value should not be empty")
+	assert.NotEmpty(t, killValue, "Kill value should not be empty")
+	assert.Contains(t, killValue, "kill_signal_", "Kill value should contain kill_signal_ prefix")
+
+	// 清理终止信号
+	etcdClient.Delete(killKey)
 }
 
 func TestIsJobAssignedToWorker(t *testing.T) {

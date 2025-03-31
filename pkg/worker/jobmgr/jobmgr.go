@@ -2,6 +2,7 @@ package jobmgr
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,6 +88,37 @@ func (m *WorkerJobManager) WatchJobs() {
 
 	// 监听所有任务的变化
 	m.etcdClient.WatchWithPrefix(constants.JobPrefix, func(eventType, key, value string) {
+		// 检查是否是kill信号
+		if strings.HasSuffix(key, "/kill") {
+			if eventType == "PUT" {
+				// 提取jobID (移除前缀和/kill后缀)
+				jobID := key[len(constants.JobPrefix) : len(key)-len("/kill")]
+				utils.Info("received kill signal", zap.String("job_id", jobID), zap.String("value", value))
+
+				// 尝试获取任务
+				job, err := m.GetJob(jobID)
+				if err != nil {
+					utils.Warn("received kill signal for unknown job",
+						zap.String("job_id", jobID),
+						zap.Error(err))
+					return
+				}
+
+				// 检查任务是否分配给当前Worker
+				if m.IsJobAssignedToWorker(job) {
+					// 创建任务事件
+					event := &JobEvent{
+						Type: JobEventKill,
+						Job:  job,
+					}
+
+					// 通知所有处理器
+					m.notifyHandlers(event)
+				}
+			}
+			return
+		}
+
 		// 解析任务ID
 		jobID := key[len(constants.JobPrefix):]
 
@@ -268,31 +300,47 @@ func (m *WorkerJobManager) KillJob(jobID string) error {
 
 // IsJobAssignedToWorker 检查任务是否分配给当前Worker
 func (m *WorkerJobManager) IsJobAssignedToWorker(job *models.Job) bool {
-	utils.Info("checking job assignment", 
-        zap.String("job_id", job.ID),
-        zap.String("current_worker_id", m.workerID),
-        zap.Any("job_env", job.Env))
-	
-	// 检查任务是否指定了特定Worker
-	if job.Env != nil {
-		if assignedWorkerID, exists := job.Env["ASSIGNED_WORKER_ID"]; exists {
-			result := assignedWorkerID == m.workerID
-            utils.Info("checking ASSIGNED_WORKER_ID", 
-                zap.String("job_id", job.ID),
-                zap.String("assigned_worker_id", assignedWorkerID),
-                zap.Bool("is_assigned_to_current_worker", result))
-            return result
-		}
+	utils.Info("checking job assignment",
+		zap.String("job_id", job.ID),
+		zap.String("current_worker_id", m.workerID),
+		zap.Any("job_env", job.Env))
 
-		if workerID, exists := job.Env["WORKER_ID"]; exists {
-			result := workerID == m.workerID
-            utils.Info("checking WORKER_ID", 
+	// 检查任务是否指定了特定Worker
+    if job.Env != nil {
+        // 检查各种可能的Worker ID环境变量
+        if workerID, ok := job.Env["WORKER_ID"]; ok {
+            utils.Info("checking WORKER_ID",
                 zap.String("job_id", job.ID),
                 zap.String("worker_id", workerID),
-                zap.Bool("is_assigned_to_current_worker", result))
-            return result
-		}
-	}
+                zap.Bool("is_assigned_to_current_worker", workerID == m.workerID))
+            return workerID == m.workerID
+        }
+
+        if workerID, ok := job.Env["ASSIGNED_WORKER_ID"]; ok {
+            utils.Info("checking ASSIGNED_WORKER_ID",
+                zap.String("job_id", job.ID),
+                zap.String("worker_id", workerID),
+                zap.Bool("is_assigned_to_current_worker", workerID == m.workerID))
+            return workerID == m.workerID
+        }
+
+        if workerID, ok := job.Env["EXECUTOR_WORKER_ID"]; ok {
+            utils.Info("checking EXECUTOR_WORKER_ID",
+                zap.String("job_id", job.ID),
+                zap.String("worker_id", workerID),
+                zap.Bool("is_assigned_to_current_worker", workerID == m.workerID))
+            return workerID == m.workerID
+        }
+
+        // 添加对RUNNING_WORKER_ID的检查
+        if workerID, ok := job.Env["RUNNING_WORKER_ID"]; ok {
+            utils.Info("checking RUNNING_WORKER_ID",
+                zap.String("job_id", job.ID),
+                zap.String("worker_id", workerID),
+                zap.Bool("is_assigned_to_current_worker", workerID == m.workerID))
+            return workerID == m.workerID
+        }
+    }
 
 	// 如果任务没有指定Worker，则根据其他规则判断
 	// 1. 检查任务是否有标签要求
@@ -311,20 +359,25 @@ func (m *WorkerJobManager) IsJobAssignedToWorker(job *models.Job) bool {
 	// 针对特定状态的任务，检查是否应该由本Worker处理
 	if job.Status == constants.JobStatusRunning {
 		// 检查是否由本Worker执行
-		return job.Env != nil && job.Env["EXECUTOR_WORKER_ID"] == m.workerID
+		return job.Env != nil && (
+            job.Env["EXECUTOR_WORKER_ID"] == m.workerID ||
+            job.Env["RUNNING_WORKER_ID"] == m.workerID)
 	}
 
 	// 默认：只有在没有Worker ID的情况下，才允许其他Worker处理
 	// 这可以根据实际需求进行调整
-	if job.Env != nil && (job.Env["ASSIGNED_WORKER_ID"] != "" || job.Env["WORKER_ID"] != "") {
-		// 如果任务分配了Worker但不是当前Worker，则拒绝处理
-		return job.Env["ASSIGNED_WORKER_ID"] == m.workerID ||
-			job.Env["WORKER_ID"] == m.workerID
-	}
+	if job.Env != nil && (job.Env["ASSIGNED_WORKER_ID"] != "" || 
+        job.Env["WORKER_ID"] != "" || 
+        job.Env["RUNNING_WORKER_ID"] != "") {
+        // 如果任务分配了Worker但不是当前Worker，则拒绝处理
+        return job.Env["ASSIGNED_WORKER_ID"] == m.workerID ||
+            job.Env["WORKER_ID"] == m.workerID ||
+            job.Env["RUNNING_WORKER_ID"] == m.workerID
+    }
 
-	utils.Info("returning default job assignment", 
-        zap.String("job_id", job.ID),
-        zap.Bool("result", true))
+	utils.Info("returning default job assignment",
+		zap.String("job_id", job.ID),
+		zap.Bool("result", true))
 	return true // 默认允许所有Worker处理所有任务
 }
 
