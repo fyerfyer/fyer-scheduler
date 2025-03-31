@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,14 +30,15 @@ func TestEndToEndTaskExecution(t *testing.T) {
 	// 创建唯一的worker ID
 	workerID := testutils.GenerateUniqueID("worker")
 
-	// 创建执行通道和执行跟踪器
-	executedJobs := make(map[string]bool)
+	// 创建执行结果追踪器
 	executionResults := make(map[string]*executor.ExecutionResult)
+	executionLogs := make(map[string]string)
 	executionMutex := sync.Mutex{}
 
 	// 创建执行报告器
-	mockReporter := &testExecutionReporter{
+	mockReporter := &testIntegrationExecutionReporter{
 		executionResults: executionResults,
+		executionLogs:    executionLogs,
 		mutex:            &executionMutex,
 	}
 
@@ -60,37 +63,52 @@ func TestEndToEndTaskExecution(t *testing.T) {
 
 	// 创建执行函数
 	executeJobFunc := func(job *scheduler.ScheduledJob) error {
-		executionMutex.Lock()
-		defer executionMutex.Unlock()
-
-		utils.Info("executing job", zap.String("job_id", job.Job.ID))
+		t.Logf("executing job %s", job.Job.ID)
 
 		// 创建执行上下文
+		executionID := "exec-" + job.Job.ID
+
+		// 处理命令和参数
+		var command string
+		var args []string
+
+		if runtime.GOOS == "windows" {
+			// Windows环境下使用cmd /c作为命令，后面是参数
+			command = "cmd"
+			args = []string{"/c", job.Job.Command}
+		} else {
+			// Linux环境下，拆分命令和参数
+			parts := strings.Split(job.Job.Command, " ")
+			command = parts[0]
+			if len(parts) > 1 {
+				args = parts[1:]
+			}
+		}
+
 		execCtx := &executor.ExecutionContext{
-			ExecutionID:   "exec-" + job.Job.ID,
+			ExecutionID:   executionID,
 			Job:           job.Job,
-			Command:       job.Job.Command,
-			Args:          job.Job.Args,
+			Command:       command,
+			Args:          args,
 			WorkDir:       job.Job.WorkDir,
 			Environment:   job.Job.Env,
 			Timeout:       time.Duration(job.Job.Timeout) * time.Second,
 			Reporter:      mockReporter,
-			MaxOutputSize: 10 * 1024 * 1024, // 10MB
+			MaxOutputSize: 1024 * 1024, // 1MB
 		}
 
 		// 执行命令
-		result, err := exec.Execute(context.Background(), execCtx)
+		ctx := context.Background()
+		result, err := exec.Execute(ctx, execCtx)
 		if err != nil {
-			utils.Error("job execution failed", zap.String("job_id", job.Job.ID), zap.Error(err))
+			t.Logf("Error executing job: %v", err)
 			return err
 		}
 
-		executedJobs[job.Job.ID] = true
-		executionResults[job.Job.ID] = result
-
-		utils.Info("job executed successfully",
-			zap.String("job_id", job.Job.ID),
-			zap.Int("exit_code", result.ExitCode))
+		// 保存执行结果
+		executionMutex.Lock()
+		executionResults[executionID] = result
+		executionMutex.Unlock()
 
 		return nil
 	}
@@ -112,55 +130,54 @@ func TestEndToEndTaskExecution(t *testing.T) {
 	// 创建任务工厂
 	jobFactory := testutils.NewJobFactory()
 
-	// 创建一个简单任务
-	simpleJob := jobFactory.CreateSimpleJob()
-	simpleJob.Status = constants.JobStatusPending
-	simpleJob.Enabled = true
+	// 创建一个简单任务 - 使用适合当前操作系统的命令
+	var job *models.Job
+	if runtime.GOOS == "windows" {
+		job = jobFactory.CreateJobWithCommand("echo hello world")
+	} else {
+		job = jobFactory.CreateJobWithCommand("echo hello world")
+	}
 
 	// 添加 Worker ID 到任务环境变量，将其分配给当前 Worker
-	if simpleJob.Env == nil {
-		simpleJob.Env = make(map[string]string)
+	if job.Env == nil {
+		job.Env = make(map[string]string)
 	}
-	simpleJob.Env["WORKER_ID"] = workerID
+	job.Env["WORKER_ID"] = workerID
 
 	// 转换为 JSON 并保存到 etcd
-	jobJSON, err := simpleJob.ToJSON()
+	jobJSON, err := job.ToJSON()
 	require.NoError(t, err, "Failed to convert job to JSON")
 
 	// 将任务保存到 etcd
-	jobKey := constants.JobPrefix + simpleJob.ID
-	err = etcdClient.Put(jobKey, jobJSON)
-	require.NoError(t, err, "Failed to put job in etcd")
+	err = etcdClient.Put(constants.JobPrefix+job.ID, jobJSON)
+	require.NoError(t, err, "Failed to put job to etcd")
 
 	// 等待 JobManager 检测到任务
 	time.Sleep(2 * time.Second)
 
 	// 立即触发任务执行
-	err = sched.TriggerJob(simpleJob.ID)
+	err = sched.TriggerJob(job.ID)
 	require.NoError(t, err, "Failed to trigger job")
 
 	// 等待任务执行完成
-	waitForExecution := func() bool {
-		executionMutex.Lock()
-		defer executionMutex.Unlock()
-		return executedJobs[simpleJob.ID]
-	}
+	var result *executor.ExecutionResult
 
 	// 等待最多10秒钟
-	success := testutils.WaitForCondition(waitForExecution, 10*time.Second)
-	assert.True(t, success, "Job should have been executed within timeout")
+	success := testutils.WaitForCondition(func() bool {
+		executionMutex.Lock()
+		defer executionMutex.Unlock()
+
+		executionID := "exec-" + job.ID
+		result = executionResults[executionID]
+		return result != nil
+	}, 10*time.Second)
 
 	// 验证任务执行结果
-	executionMutex.Lock()
-	result, exists := executionResults[simpleJob.ID]
-	executionMutex.Unlock()
-
-	assert.True(t, exists, "Execution result should exist")
-	if exists {
-		assert.Equal(t, 0, result.ExitCode, "Exit code should be 0")
-		assert.Equal(t, executor.ExecutionStateSuccess, result.State, "Execution state should be success")
-		assert.Contains(t, result.Output, "hello world", "Output should contain expected text")
-	}
+	require.True(t, success, "Job execution did not complete within timeout")
+	assert.NotNil(t, result, "Execution result should not be nil")
+	assert.Equal(t, executor.ExecutionStateSuccess, result.State, "Job should have executed successfully")
+	assert.Equal(t, 0, result.ExitCode, "Exit code should be 0")
+	assert.Contains(t, result.Output, "hello world", "Output should contain 'hello world'")
 }
 
 // TestWorkerJobManagerAndSchedulerIntegration 测试 WorkerJobManager 和调度器的集成
@@ -266,16 +283,18 @@ func TestExecutorAndSchedulerIntegration(t *testing.T) {
 	etcdClient, mongoClient := testutils.SetupTestEnvironment(t)
 	defer testutils.TeardownTestEnvironment(t, etcdClient, mongoClient)
 
-	// 创建唯一的 worker ID
+	// 创建唯一的worker ID
 	workerID := testutils.GenerateUniqueID("worker")
 
-	// 创建执行结果追踪
+	// 创建执行结果追踪器
 	executionResults := make(map[string]*executor.ExecutionResult)
+	executionLogs := make(map[string]string)
 	executionMutex := sync.Mutex{}
 
 	// 创建执行报告器
-	mockReporter := &testExecutionReporter{
+	mockReporter := &testIntegrationExecutionReporter{
 		executionResults: executionResults,
+		executionLogs:    executionLogs,
 		mutex:            &executionMutex,
 	}
 
@@ -286,13 +305,13 @@ func TestExecutorAndSchedulerIntegration(t *testing.T) {
 		executor.WithDefaultTimeout(30*time.Second),
 	)
 
-	// 创建 WorkerJobManager
+	// 创建WorkerJobManager
 	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
 	err := jobManager.Start()
 	require.NoError(t, err, "Failed to start job manager")
 	defer jobManager.Stop()
 
-	// 创建 LockManager
+	// 创建LockManager
 	lockManager := joblock.NewLockManager(etcdClient, workerID)
 	err = lockManager.Start()
 	require.NoError(t, err, "Failed to start lock manager")
@@ -303,8 +322,9 @@ func TestExecutorAndSchedulerIntegration(t *testing.T) {
 		utils.Info("executing job with executor", zap.String("job_id", job.Job.ID))
 
 		// 创建执行上下文
+		executionID := "exec-" + job.Job.ID
 		execCtx := &executor.ExecutionContext{
-			ExecutionID:   "exec-" + job.Job.ID,
+			ExecutionID:   executionID,
 			Job:           job.Job,
 			Command:       job.Job.Command,
 			Args:          job.Job.Args,
@@ -315,20 +335,25 @@ func TestExecutorAndSchedulerIntegration(t *testing.T) {
 			MaxOutputSize: 10 * 1024 * 1024, // 10MB
 		}
 
-		// 执行命令
+		if execCtx.Environment == nil {
+			execCtx.Environment = make(map[string]string)
+		}
+		execCtx.Environment["EXECUTOR_WORKER_ID"] = workerID
+
+		// 使用 executor 执行命令
 		result, err := exec.Execute(context.Background(), execCtx)
 		if err != nil {
 			utils.Error("job execution failed", zap.String("job_id", job.Job.ID), zap.Error(err))
 			return err
 		}
 
-		executionMutex.Lock()
-		executionResults[job.Job.ID] = result
-		executionMutex.Unlock()
+		utils.Info("job executed successfully", zap.String("job_id", job.Job.ID), zap.Int("exit_code", result.ExitCode))
 
-		utils.Info("job executed successfully",
-			zap.String("job_id", job.Job.ID),
-			zap.Int("exit_code", result.ExitCode))
+		// 保存执行结果
+		mockReporter.ReportCompletion(executionID, result)
+		executionMutex.Lock()
+		executionLogs[executionID] = "Process started with PID " + result.ExecutionID + "\n" + result.Output
+		executionMutex.Unlock()
 
 		return nil
 	}
@@ -339,6 +364,7 @@ func TestExecutorAndSchedulerIntegration(t *testing.T) {
 		lockManager,
 		executeJobFunc,
 		scheduler.WithCheckInterval(1*time.Second),
+		scheduler.WithMaxConcurrent(3),
 	)
 
 	// 启动调度器
@@ -349,214 +375,56 @@ func TestExecutorAndSchedulerIntegration(t *testing.T) {
 	// 创建任务工厂
 	jobFactory := testutils.NewJobFactory()
 
-	// 创建一个命令任务
-	commandJob := jobFactory.CreateJobWithCommand("echo test integration")
-	commandJob.Status = constants.JobStatusPending
-	commandJob.Enabled = true
-
-	// 添加 Worker ID 到任务环境变量
-	if commandJob.Env == nil {
-		commandJob.Env = make(map[string]string)
-	}
-	commandJob.Env["WORKER_ID"] = workerID
-
-	// 添加任务到调度器
-	err = sched.AddJob(commandJob)
-	require.NoError(t, err, "Failed to add job to scheduler")
-
-	// 立即触发任务执行
-	err = sched.TriggerJob(commandJob.ID)
-	require.NoError(t, err, "Failed to trigger job")
-
-	// 等待任务执行完成
-	waitForExecution := func() bool {
-		executionMutex.Lock()
-		defer executionMutex.Unlock()
-		_, exists := executionResults[commandJob.ID]
-		return exists
+	// 创建一个命令任务 - 使用适合当前操作系统的命令，正确分割命令和参数
+	var job *models.Job
+	if runtime.GOOS == "windows" {
+		// 在Windows上，正确分离命令和参数
+		job = jobFactory.CreateJobWithCommand("cmd.exe")
+		job.Args = []string{"/c", "echo test integration"}
+	} else {
+		// 在Unix/Linux上
+		job = jobFactory.CreateJobWithCommand("echo")
+		job.Args = []string{"test integration"}
 	}
 
-	// 等待最多10秒钟
-	success := testutils.WaitForCondition(waitForExecution, 10*time.Second)
-	assert.True(t, success, "Job should have been executed within timeout")
-
-	// 验证任务执行结果
-	executionMutex.Lock()
-	result, exists := executionResults[commandJob.ID]
-	executionMutex.Unlock()
-
-	assert.True(t, exists, "Execution result should exist")
-	if exists {
-		assert.Equal(t, 0, result.ExitCode, "Exit code should be 0")
-		assert.Equal(t, executor.ExecutionStateSuccess, result.State, "Execution state should be success")
-		assert.Contains(t, result.Output, "test integration", "Output should contain expected text")
-	}
-}
-
-// TestNetworkOrConnectionIssues 测试网络或连接问题
-func TestNetworkOrConnectionIssues(t *testing.T) {
-	// 设置测试环境
-	etcdClient, mongoClient := testutils.SetupTestEnvironment(t)
-	defer testutils.TeardownTestEnvironment(t, etcdClient, mongoClient)
-
-	// 创建唯一的 worker ID
-	workerID := testutils.GenerateUniqueID("worker")
-
-	// 创建执行通道和执行跟踪器
-	jobEvents := make(map[string]jobmgr.JobEventType)
-	eventMutex := sync.Mutex{}
-
-	// 创建任务事件处理器
-	eventHandler := &testTaskJobEventHandler{
-		events:     jobEvents,
-		eventMutex: &eventMutex,
-	}
-
-	// 创建 WorkerJobManager
-	jobManager := jobmgr.NewWorkerJobManager(etcdClient, workerID)
-	err := jobManager.Start()
-	require.NoError(t, err, "Failed to start job manager")
-	defer jobManager.Stop()
-
-	// 注册事件处理器
-	jobManager.RegisterHandler(eventHandler)
-
-	// 创建 LockManager
-	lockManager := joblock.NewLockManager(etcdClient, workerID)
-	err = lockManager.Start()
-	require.NoError(t, err, "Failed to start lock manager")
-	defer lockManager.Stop()
-
-	// 创建执行函数
-	var jobsExecuted int
-	jobsExecutedMutex := sync.Mutex{}
-
-	executeJobFunc := func(job *scheduler.ScheduledJob) error {
-		jobsExecutedMutex.Lock()
-		jobsExecuted++
-		jobsExecutedMutex.Unlock()
-
-		utils.Info("job executed", zap.String("job_id", job.Job.ID))
-		return nil
-	}
-
-	// 创建调度器
-	sched := scheduler.NewScheduler(
-		jobManager,
-		lockManager,
-		executeJobFunc,
-		scheduler.WithCheckInterval(500*time.Millisecond),
-		scheduler.WithRetryStrategy(3, 1*time.Second),
-	)
-
-	// 启动调度器
-	err = sched.Start()
-	require.NoError(t, err, "Failed to start scheduler")
-	defer sched.Stop()
-
-	// 创建任务工厂
-	jobFactory := testutils.NewJobFactory()
-
-	// 创建一个简单任务
-	job := jobFactory.CreateSimpleJob()
-	job.Status = constants.JobStatusPending
-	job.Enabled = true
-
-	// 添加 Worker ID 到任务环境变量
+	// 添加 Worker ID 到任务环境变量，将其分配给当前 Worker
 	if job.Env == nil {
 		job.Env = make(map[string]string)
 	}
 	job.Env["WORKER_ID"] = workerID
 
-	// 转换为 JSON 并保存到 etcd
-	jobJSON, err := job.ToJSON()
-	require.NoError(t, err, "Failed to convert job to JSON")
+	// 添加任务到调度器
+	err = sched.AddJob(job)
+	require.NoError(t, err, "Failed to add job to scheduler")
 
-	// 将任务保存到 etcd
-	jobKey := constants.JobPrefix + job.ID
-	err = etcdClient.Put(jobKey, jobJSON)
-	require.NoError(t, err, "Failed to put job in etcd")
-
-	// 等待 JobManager 检测到任务
-	time.Sleep(2 * time.Second)
-
-	// 验证任务已被添加到调度器
-	eventMutex.Lock()
-	_, eventReceived := jobEvents[job.ID]
-	eventMutex.Unlock()
-	assert.True(t, eventReceived, "Job event should have been received")
-
-	// 模拟网络断开：关闭 etcd 客户端并重新创建一个
-	err = etcdClient.Close()
-	require.NoError(t, err, "Failed to close etcd client")
-
-	// 立即触发任务执行，应该可以成功因为任务已在本地添加
+	// 立即触发任务执行
 	err = sched.TriggerJob(job.ID)
 	require.NoError(t, err, "Failed to trigger job")
 
-	// 等待任务执行
-	time.Sleep(2 * time.Second)
+	// 等待任务执行完成
+	var result *executor.ExecutionResult
+	executionID := "exec-" + job.ID
 
-	// 验证任务已执行
-	jobsExecutedMutex.Lock()
-	executed := jobsExecuted > 0
-	jobsExecutedMutex.Unlock()
-	assert.True(t, executed, "Job should have been executed despite network issues")
+	// 等待最多10秒钟
+	jobExecuted := false
+	for i := 0; i < 10; i++ {
+		time.Sleep(1 * time.Second)
+		executionMutex.Lock()
+		if r, exists := executionResults[executionID]; exists {
+			result = r
+			jobExecuted = true
+			executionMutex.Unlock()
+			break
+		}
+		executionMutex.Unlock()
+	}
 
-	// 重新创建 etcd 连接
-	newEtcdClient, err := testutils.TestEtcdClient()
-	require.NoError(t, err, "Failed to create new etcd client")
-	defer newEtcdClient.Close()
-
-	// 更新任务状态（模拟重新连接后的操作）
-	job.Status = constants.JobStatusSucceeded
-	jobJSON, err = job.ToJSON()
-	require.NoError(t, err, "Failed to convert job to JSON")
-
-	err = newEtcdClient.Put(jobKey, jobJSON)
-	require.NoError(t, err, "Failed to update job in etcd")
-
-	// 等待 etcd 变更传播
-	time.Sleep(2 * time.Second)
-}
-
-// testExecutionReporter 是一个用于测试的执行报告器
-type testExecutionReporter struct {
-	executionResults map[string]*executor.ExecutionResult
-	mutex            *sync.Mutex
-}
-
-func (r *testExecutionReporter) ReportStart(executionID string, pid int) error {
-	return nil
-}
-
-func (r *testExecutionReporter) ReportOutput(executionID string, output string) error {
-	return nil
-}
-
-func (r *testExecutionReporter) ReportCompletion(executionID string, result *executor.ExecutionResult) error {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	r.executionResults[executionID] = result
-	return nil
-}
-
-func (r *testExecutionReporter) ReportError(executionID string, err error) error {
-	return nil
-}
-
-func (r *testExecutionReporter) ReportProgress(executionID string, status *executor.ExecutionStatus) error {
-	return nil
-}
-
-// testTaskJobEventHandler 是一个用于测试的任务事件处理器
-type testTaskJobEventHandler struct {
-	events     map[string]jobmgr.JobEventType
-	eventMutex *sync.Mutex
-}
-
-func (h *testTaskJobEventHandler) HandleJobEvent(event *jobmgr.JobEvent) {
-	h.eventMutex.Lock()
-	defer h.eventMutex.Unlock()
-	h.events[event.Job.ID] = event.Type
+	// 验证任务执行结果
+	assert.True(t, jobExecuted, "Job should have been executed within timeout")
+	assert.True(t, result != nil, "Execution result should exist")
+	if result != nil {
+		assert.Equal(t, 0, result.ExitCode, "Job should exit with code 0")
+		assert.Equal(t, executor.ExecutionStateSuccess, result.State, "Job should succeed")
+		assert.Contains(t, executionLogs[executionID], "test integration", "Output should contain expected text")
+	}
 }

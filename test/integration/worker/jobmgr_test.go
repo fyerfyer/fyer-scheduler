@@ -35,25 +35,6 @@ func createTestJobManager(t *testing.T, workerID string) jobmgr.IWorkerJobManage
 	return jobManager
 }
 
-// 测试用的任务事件处理器
-type testJobEventHandler struct {
-	events []*jobmgr.JobEvent
-	t      *testing.T
-}
-
-func newTestJobEventHandler(t *testing.T) *testJobEventHandler {
-	return &testJobEventHandler{
-		events: make([]*jobmgr.JobEvent, 0),
-		t:      t,
-	}
-}
-
-// HandleJobEvent 实现IJobEventHandler接口
-func (h *testJobEventHandler) HandleJobEvent(event *jobmgr.JobEvent) {
-	h.t.Logf("Received job event: type=%v, job=%s", event.Type, event.Job.ID)
-	h.events = append(h.events, event)
-}
-
 func TestEtcdGetWithPrefix(t *testing.T) {
 	// 创建etcd客户端
 	etcdClient, err := testutils.TestEtcdClient()
