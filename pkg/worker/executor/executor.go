@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,8 +159,32 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext) (*Exe
 		return result, nil
 	case <-ctx.Done():
 		// 上下文被取消，尝试终止任务
-		e.Kill(execCtx.ExecutionID)
-		return nil, ctx.Err()
+		// 上下文被取消，尝试终止任务
+		utils.Info("context canceled, killing execution",
+			zap.String("execution_id", execCtx.ExecutionID))
+
+		err := e.Kill(execCtx.ExecutionID)
+		if err != nil {
+			utils.Warn("failed to kill process",
+				zap.String("execution_id", execCtx.ExecutionID),
+				zap.Error(err))
+		}
+
+		// 等待结果，而不是直接返回错误
+		// 注意：此处增加一个合理的超时时间，防止无限等待
+		select {
+		case result := <-executorCtx.ResultChan:
+			return result, nil
+		case <-time.After(e.options.KillGracePeriod * 2):
+			return &ExecutionResult{
+				ExecutionID: execCtx.ExecutionID,
+				ExitCode:    -1,
+				Error:       "execution killed due to context cancellation, but failed to get result",
+				StartTime:   executorCtx.StartTime,
+				EndTime:     time.Now(),
+				State:       ExecutionStateCancelled,
+			}, nil
+		}
 	}
 }
 
@@ -237,6 +262,7 @@ func (e *Executor) executeCommand(ctx context.Context, executorCtx *ExecutorCont
 
 	// 等待进程完成
 	exitCode, exitErr, isTimeout := process.WaitWithTimeout(execCtx.Timeout)
+	fmt.Printf("DEBUG: Process result: exitCode=%d, exitErr=%v, isTimeout=%v\n", exitCode, exitErr, isTimeout)
 
 	// 处理执行结果
 	executorCtx.EndTime = time.Now()
@@ -244,9 +270,38 @@ func (e *Executor) executeCommand(ctx context.Context, executorCtx *ExecutorCont
 	// 获取输出
 	output := process.GetOutput()
 
-	if isTimeout {
-		// 处理超时情况
+	// 首先确认上下文是否被取消 - 这优先于其他状态
+	if errors.Is(ctx.Err(), context.Canceled) {
+		// Handle cancellation
+		utils.Info("execution was cancelled by context",
+			zap.String("execution_id", execCtx.ExecutionID))
+
+		result.ExitCode = exitCode
+		result.Output = output
+		result.EndTime = executorCtx.EndTime
+		result.State = ExecutionStateCancelled
+
+		executorCtx.State = ExecutionStateCancelled
+		e.updateExecutionStatus(execCtx.ExecutionID, ExecutionStateCancelled, process.GetPid())
+
+		if execCtx.Reporter != nil {
+			execCtx.Reporter.ReportCompletion(execCtx.ExecutionID, result)
+		}
+	} else if isTimeout {
+		utils.Info("execution timed out",
+			zap.String("execution_id", execCtx.ExecutionID),
+			zap.Duration("timeout", execCtx.Timeout))
+
 		e.handleExecutionTimeout(executorCtx)
+
+		result.ExitCode = -1
+		result.Error = fmt.Sprintf("execution timed out after %v", execCtx.Timeout)
+		result.Output = output
+		result.EndTime = executorCtx.EndTime
+		result.State = ExecutionStateTimeout
+
+		// 确认结果正确设置为超时
+		executorCtx.ResultChan <- result
 	} else if exitErr != nil {
 		// 处理执行错误
 		result.ExitCode = exitCode
@@ -345,13 +400,13 @@ func (e *Executor) handleExecutionTimeout(executorCtx *ExecutorContext) {
 	executorCtx.EndTime = time.Now()
 	executorCtx.State = ExecutionStateTimeout
 
-	// 尝试终止进程
+	// Try to terminate the process
 	_ = process.Kill()
 
 	result := &ExecutionResult{
 		ExecutionID: execCtx.ExecutionID,
 		ExitCode:    -1,
-		Error:       "execution timed out",
+		Error:       fmt.Sprintf("execution timed out after %v", execCtx.Timeout),
 		Output:      process.GetOutput(),
 		StartTime:   executorCtx.StartTime,
 		EndTime:     executorCtx.EndTime,
@@ -363,6 +418,14 @@ func (e *Executor) handleExecutionTimeout(executorCtx *ExecutorContext) {
 	if execCtx.Reporter != nil {
 		execCtx.Reporter.ReportError(execCtx.ExecutionID, fmt.Errorf("execution timed out after %v", execCtx.Timeout))
 		execCtx.Reporter.ReportCompletion(execCtx.ExecutionID, result)
+	}
+
+	// Important: Make sure the result is sent to the result channel
+	select {
+	case executorCtx.ResultChan <- result:
+	default:
+		utils.Warn("could not send timeout result, channel might be closed",
+			zap.String("execution_id", execCtx.ExecutionID))
 	}
 }
 
@@ -526,11 +589,19 @@ func (e *Executor) waitForAvailableSlot(ctx context.Context) {
 		return // 无限制
 	}
 
+	utils.Info("waitForAvailableSlot called",
+		zap.Int("current_running", e.runningCount),
+		zap.Int("max_concurrent", e.options.MaxConcurrentExecutions))
+
 	e.processMutex.Lock()
 	defer e.processMutex.Unlock()
 
 	// 等待直到运行中的任务数小于最大并发执行数
 	for e.runningCount >= e.options.MaxConcurrentExecutions {
+		utils.Info("waiting for available execution slot",
+			zap.Int("current_running", e.runningCount),
+			zap.Int("max_concurrent", e.options.MaxConcurrentExecutions))
+
 		// 创建一个通道用于监听上下文取消
 		done := make(chan struct{})
 
@@ -555,6 +626,10 @@ func (e *Executor) waitForAvailableSlot(ctx context.Context) {
 			return
 		}
 	}
+
+	utils.Info("slot available, proceeding with execution",
+		zap.Int("current_running", e.runningCount),
+		zap.Int("max_concurrent", e.options.MaxConcurrentExecutions))
 }
 
 // cleanupLoop 定期清理过期的执行状态

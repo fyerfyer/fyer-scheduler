@@ -242,6 +242,7 @@ func (p *Process) WaitWithTimeout(timeout time.Duration) (int, error, bool) {
 		// 设置超时标志
 		p.mutex.Lock()
 		p.isTimedOut = true
+		fmt.Printf("DEBUG: Setting isTimedOut flag to true for process %s\n", p.executionID)
 		p.mutex.Unlock()
 
 		// 终止进程
@@ -253,6 +254,8 @@ func (p *Process) WaitWithTimeout(timeout time.Duration) (int, error, bool) {
 		p.mutex.RLock()
 		defer p.mutex.RUnlock()
 		// 即使进程有退出码，也将其视为超时
+		fmt.Printf("DEBUG: After timeout kill, process %s has exitCode: %d, error: %v, isTimedOut: %v\n",
+			p.executionID, p.exitCode, p.exitErr, p.isTimedOut)
 		return -1, fmt.Errorf("process execution timed out after %v", timeout), true
 
 	case <-p.done:

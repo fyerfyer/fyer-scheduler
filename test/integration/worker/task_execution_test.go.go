@@ -407,7 +407,7 @@ func TestNetworkOrConnectionIssues(t *testing.T) {
 	eventMutex := sync.Mutex{}
 
 	// 创建任务事件处理器
-	eventHandler := &testJobEventHandler{
+	eventHandler := &testTaskJobEventHandler{
 		events:     jobEvents,
 		eventMutex: &eventMutex,
 	}
@@ -549,13 +549,13 @@ func (r *testExecutionReporter) ReportProgress(executionID string, status *execu
 	return nil
 }
 
-// testJobEventHandler 是一个用于测试的任务事件处理器
-type testJobEventHandler struct {
+// testTaskJobEventHandler 是一个用于测试的任务事件处理器
+type testTaskJobEventHandler struct {
 	events     map[string]jobmgr.JobEventType
 	eventMutex *sync.Mutex
 }
 
-func (h *testJobEventHandler) HandleJobEvent(event *jobmgr.JobEvent) {
+func (h *testTaskJobEventHandler) HandleJobEvent(event *jobmgr.JobEvent) {
 	h.eventMutex.Lock()
 	defer h.eventMutex.Unlock()
 	h.events[event.Job.ID] = event.Type
