@@ -299,9 +299,9 @@ func (e *EtcdClient) TryAcquireLock(lockKey string, ttl int64) (clientv3.LeaseID
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.EtcdOpTimeout)*time.Second)
 		defer cancel()
 
-		Info("creating lease for lock", 
-            zap.String("lock_key", lockKey), 
-            zap.Int64("ttl", ttl))
+		Info("creating lease for lock",
+			zap.String("lock_key", lockKey),
+			zap.Int64("ttl", ttl))
 
 		lease, err := e.client.Grant(ctx, ttl)
 		if err != nil {
@@ -317,20 +317,20 @@ func (e *EtcdClient) TryAcquireLock(lockKey string, ttl int64) (clientv3.LeaseID
 		resp, err := txn.Commit()
 		if err != nil {
 			// 如果事务失败，尝试撤销租约
-            _, _ = e.client.Revoke(context.Background(), lease.ID)
+			_, _ = e.client.Revoke(context.Background(), lease.ID)
 			return fmt.Errorf("transaction failed: %w", err)
 		}
 
 		if !resp.Succeeded {
 			// 锁已被占用
 			// 尝试撤销租约
-            _, _ = e.client.Revoke(context.Background(), lease.ID)
+			_, _ = e.client.Revoke(context.Background(), lease.ID)
 			return fmt.Errorf("lock already acquired by another client")
 		}
 
-		Info("lock acquired successfully", 
-            zap.String("lock_key", lockKey), 
-            zap.Int64("lease_id", int64(lease.ID)))
+		Info("lock acquired successfully",
+			zap.String("lock_key", lockKey),
+			zap.Int64("lease_id", int64(lease.ID)))
 
 		leaseID = lease.ID
 		return nil
@@ -338,9 +338,9 @@ func (e *EtcdClient) TryAcquireLock(lockKey string, ttl int64) (clientv3.LeaseID
 
 	err := e.withRetry(operation, "TryAcquireLock: "+lockKey)
 	if err != nil {
-		Error("failed to acquire lock after retries", 
-            zap.String("lock_key", lockKey), 
-            zap.Error(err))
+		Error("failed to acquire lock after retries",
+			zap.String("lock_key", lockKey),
+			zap.Error(err))
 	}
 
 	return leaseID, err
@@ -386,4 +386,18 @@ func (e *EtcdClient) KeepAliveLock(leaseID clientv3.LeaseID) error {
 // KeepAliveLease 启动租约自动续期，返回响应channel
 func (e *EtcdClient) KeepAliveLease(ctx context.Context, leaseID clientv3.LeaseID) (<-chan *clientv3.LeaseKeepAliveResponse, error) {
 	return e.client.KeepAlive(ctx, leaseID)
+}
+
+// IsLeaseValid 检查租约是否有效
+func (e *EtcdClient) IsLeaseValid(leaseID clientv3.LeaseID) bool {
+	if leaseID == 0 {
+		return false
+	}
+
+	// 获取租约信息，使用短暂的超时
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.EtcdOpTimeout)*time.Second)
+	defer cancel()
+
+	_, err := e.client.TimeToLive(ctx, leaseID)
+	return err == nil
 }

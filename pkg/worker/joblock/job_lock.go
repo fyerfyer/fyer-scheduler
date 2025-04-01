@@ -60,8 +60,8 @@ func (j *JobLock) TryLock() (bool, error) {
 	// 如果已经持有锁，直接返回成功
 	if j.isLocked {
 		utils.Debug("already holding lock, returning success",
-            zap.String("job_id", j.jobID),
-            zap.String("worker_id", j.workerID))
+			zap.String("job_id", j.jobID),
+			zap.String("worker_id", j.workerID))
 		return true, nil
 	}
 
@@ -71,10 +71,10 @@ func (j *JobLock) TryLock() (bool, error) {
 	var leaseID clientv3.LeaseID
 
 	utils.Info("attempting to acquire lock",
-        zap.String("job_id", j.jobID),
-        zap.String("worker_id", j.workerID),
-        zap.String("lock_key", j.lockKey),
-        zap.Int64("ttl", j.ttl))
+		zap.String("job_id", j.jobID),
+		zap.String("worker_id", j.workerID),
+		zap.String("lock_key", j.lockKey),
+		zap.Int64("ttl", j.ttl))
 
 	for i := 0; i < j.maxRetries; i++ {
 		// 尝试获取锁
@@ -93,10 +93,10 @@ func (j *JobLock) TryLock() (bool, error) {
 		// 如果达到最大重试次数，返回错误
 		if i == j.maxRetries-1 {
 			utils.Error("max retry attempts reached",
-                zap.String("job_id", j.jobID),
-                zap.String("worker_id", j.workerID),
-                zap.Int("max_retries", j.maxRetries),
-                zap.Error(err))
+				zap.String("job_id", j.jobID),
+				zap.String("worker_id", j.workerID),
+				zap.Int("max_retries", j.maxRetries),
+				zap.Error(err))
 			return false, fmt.Errorf("failed to acquire lock after %d attempts: %w", j.maxRetries, err)
 		}
 
@@ -119,8 +119,8 @@ func (j *JobLock) TryLock() (bool, error) {
 	}
 
 	utils.Info("failed to acquire lock",
-        zap.String("job_id", j.jobID),
-        zap.String("worker_id", j.workerID))
+		zap.String("job_id", j.jobID),
+		zap.String("worker_id", j.workerID))
 
 	return false, fmt.Errorf("failed to acquire lock for job %s", j.jobID)
 }
@@ -240,21 +240,34 @@ func (j *JobLock) handleKeepAliveFailure() {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
+	// 如果已经解锁，不需要处理
+	if !j.isLocked {
+		return
+	}
+
 	// 标记为未锁定
 	j.isLocked = false
+	oldLeaseID := j.leaseID
 	j.leaseID = 0 // 清除租约ID
 
 	// 在这里，我们不自动尝试重新获取锁
 	// 这应该是由调用者决定的
 	utils.Warn("keepalive failed, lock has been released",
-        zap.String("job_id", j.jobID),
-        zap.String("worker_id", j.workerID))
+		zap.String("job_id", j.jobID),
+		zap.String("worker_id", j.workerID),
+		zap.Int64("lease_id", int64(oldLeaseID)))
 }
 
 // StopRenewal 停止自动续期
 func (j *JobLock) StopRenewal() {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
+
+	utils.Info("stopping lease renewal",
+		zap.String("job_id", j.jobID),
+		zap.String("worker_id", j.workerID),
+		zap.Int64("lease_id", int64(j.leaseID)),
+		zap.Bool("is_locked", j.isLocked))
 
 	if j.cancelFunc != nil {
 		j.cancelFunc()
@@ -263,4 +276,18 @@ func (j *JobLock) StopRenewal() {
 
 	// 清除keepalive channel而不释放锁
 	j.keepAliveCh = nil
+}
+
+// MarkAsUnlocked 标记锁为未锁定
+func (j *JobLock) MarkAsUnlocked() {
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	if j.isLocked {
+		j.isLocked = false
+		utils.Info("lock marked as unlocked due to expired lease",
+			zap.String("job_id", j.jobID),
+			zap.String("worker_id", j.workerID),
+			zap.Int64("lease_id", int64(j.leaseID)))
+	}
 }

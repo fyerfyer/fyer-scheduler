@@ -1,6 +1,7 @@
 package joblock
 
 import (
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"sync"
 	"time"
 
@@ -185,8 +186,30 @@ func (m *LockManager) cleanupInvalidLocks() {
 	var toRemove []string
 
 	for jobID, lock := range m.locks {
+		utils.Info("checking lock validity",
+			zap.String("job_id", jobID),
+			zap.Bool("is_locked", lock.IsLocked()),
+			zap.Int64("lease_id", int64(lock.GetLeaseID())))
+
+		// 获取当前锁的租约ID
+		leaseID := lock.GetLeaseID()
+		
 		// 检查锁是否仍然有效
-		if !lock.IsLocked() {
+		// 标记为无效的情况：
+		// 1. 锁未锁定
+		// 2. 租约ID为0（无效租约）
+		// 3. 通过etcd查询确认租约已过期
+		if !lock.IsLocked() || leaseID == 0 || !m.isLeaseValid(leaseID) {
+			if !lock.IsLocked() {
+				utils.Info("lock marked for removal - not locked",
+					zap.String("job_id", jobID))
+			} else {
+				utils.Info("lock marked for removal - lease expired or invalid",
+					zap.String("job_id", jobID),
+					zap.Int64("lease_id", int64(leaseID)))
+				// 如果租约过期，标记锁为未锁定状态
+				lock.MarkAsUnlocked()
+			}
 			toRemove = append(toRemove, jobID)
 		}
 	}
@@ -194,24 +217,55 @@ func (m *LockManager) cleanupInvalidLocks() {
 	// 移除无效锁
 	for _, jobID := range toRemove {
 		lock := m.locks[jobID]
+		utils.Info("attempting to unlock and remove lock",
+			zap.String("job_id", jobID),
+			zap.String("worker_id", m.workerID))
+
 		// 尝试解锁，忽略可能的错误
-		if err := lock.Unlock(); err != nil {
-			utils.Warn("error unlocking invalid lock during cleanup",
-				zap.String("job_id", jobID),
-				zap.Error(err))
+		// 由于已经标记为未锁定，这里的解锁操作可能是空操作
+		if lock.IsLocked() {
+			if err := lock.Unlock(); err != nil {
+				utils.Warn("error unlocking invalid lock during cleanup",
+					zap.String("job_id", jobID),
+					zap.Error(err))
+			}
 		}
 		delete(m.locks, jobID)
 		utils.Info("removed invalid lock during cleanup",
-			zap.String("job_id", jobID))
+			zap.String("job_id", jobID),
+			zap.String("worker_id", m.workerID))
 	}
 
 	if len(toRemove) > 0 {
 		utils.Info("cleanup completed",
 			zap.Int("removed_locks", len(toRemove)),
 			zap.Int("remaining_locks", len(m.locks)))
+	} else {
+		utils.Info("cleanup completed - no locks removed",
+			zap.Int("remaining_locks", len(m.locks)))
 	}
 }
 
+// GetWorkerID 获取当前工作节点的ID
 func (m *LockManager) GetWorkerID() string {
 	return m.workerID
+}
+
+// TriggerCleanup 手动触发清理无效锁
+func (m *LockManager) TriggerCleanup() {
+	m.cleanupInvalidLocks()
+}
+
+// isLeaseValid 检查租约是否有效
+func (m *LockManager) isLeaseValid(leaseID clientv3.LeaseID) bool {
+	if leaseID == 0 {
+		return false
+	}
+
+	// 为了更稳定的测试，增加日志
+	isValid := m.etcdClient.IsLeaseValid(leaseID)
+	utils.Info("checking lease validity",
+		zap.Int64("lease_id", int64(leaseID)),
+		zap.Bool("is_valid", isValid))
+	return isValid
 }
