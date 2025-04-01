@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"strings"
 
 	"github.com/fyerfyer/fyer-scheduler/pkg/common/constants"
 	"github.com/fyerfyer/fyer-scheduler/pkg/common/utils"
@@ -31,12 +32,18 @@ type JobLock struct {
 
 // NewJobLock 创建一个新的任务锁
 func NewJobLock(etcdClient *utils.EtcdClient, jobID, workerID string, options ...JobLockOption) *JobLock {
-	// 默认选项
+	// Ensure jobID is correctly prefixed to maintain consistency
+	lockJobID := jobID
+	if !strings.HasPrefix(jobID, "job-") {
+		lockJobID = "job-" + jobID
+	}
+
+	// Default options
 	lock := &JobLock{
 		etcdClient: etcdClient,
-		jobID:      jobID,
+		jobID:      lockJobID, // Use the consistent lockJobID
 		workerID:   workerID,
-		lockKey:    constants.LockPrefix + jobID,
+		lockKey:    constants.LockPrefix + lockJobID, // Use the consistent lockJobID
 		ttl:        constants.JobLockTTL,
 		maxRetries: 3,
 		retryDelay: 200 * time.Millisecond,
@@ -44,7 +51,7 @@ func NewJobLock(etcdClient *utils.EtcdClient, jobID, workerID string, options ..
 		notifyCh:   make(chan struct{}),
 	}
 
-	// 应用选项
+	// Apply options
 	for _, option := range options {
 		option(lock)
 	}

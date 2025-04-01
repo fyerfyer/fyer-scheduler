@@ -462,7 +462,7 @@ func (s *Scheduler) executeJob(job *ScheduledJob) {
 		zap.String("worker_id", s.workerID))
 
 	// 首先检查作业是否分配给当前Worker
-	if !s.jobManager.IsJobAssignedToWorker(job.Job) {
+	if (!s.jobManager.IsJobAssignedToWorker(job.Job)) {
 		utils.Info("job not assigned to this worker, skipping execution",
 			zap.String("job_id", job.Job.ID),
 			zap.String("worker_id", s.workerID))
@@ -616,18 +616,29 @@ func (s *Scheduler) executeJob(job *ScheduledJob) {
 		job.Lock = nil
 	}
 
-	// 处理下一次调度 - 只有当不是重试的情况下
-	if execErr == nil || job.RetryCount == 0 {
+	// 检查任务是否已从etcd中删除
+	jobExists := true
+	existingJob, err := s.jobManager.GetJob(job.Job.ID)
+	if err != nil || existingJob == nil {
+		jobExists = false
+		utils.Info("job no longer exists in etcd, will not reschedule",
+			zap.String("job_id", job.Job.ID))
+	}
+
+	// 处理下一次调度 - 只有当不是重试的情况下且任务仍然存在时
+	if jobExists && (execErr == nil || job.RetryCount == 0) {
 		s.scheduleNextRun(job)
 	}
 
 	// 更新作业状态
-	err = s.jobManager.ReportJobStatus(job.Job, status)
-	if err != nil {
-		utils.Warn("failed to report job status",
-			zap.String("job_id", job.Job.ID),
-			zap.String("status", status),
-			zap.Error(err))
+	if jobExists {
+		err = s.jobManager.ReportJobStatus(job.Job, status)
+		if err != nil {
+			utils.Warn("failed to report job status",
+				zap.String("job_id", job.Job.ID),
+				zap.String("status", status),
+				zap.Error(err))
+		}
 	}
 
 	// 设置作业的运行状态
@@ -646,12 +657,13 @@ func (s *Scheduler) executeJob(job *ScheduledJob) {
 		LastExecutionID: job.LastExecutionID,
 	}
 
-	// 只有在不是重试过程中才更新队列
-	if job.RetryCount == 0 {
+	// 只有在不是重试过程中且任务仍然存在时才更新队列
+	if jobExists && job.RetryCount == 0 {
+		// 尝试更新队列中的任务
 		err = s.jobQueue.Update(queueJob)
 		if err != nil {
-			utils.Warn("failed to update job in queue",
-				zap.String("job_id", job.Job.ID),
+			utils.Warn("failed to update job in queue", 
+				zap.String("job_id", job.Job.ID), 
 				zap.Error(err))
 		}
 	}
